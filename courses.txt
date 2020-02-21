@@ -1,0 +1,156 @@
+# this is the course spec file (comments as usual, blank lines ignored)
+# this file is structured similar to assembly language:
+
+# like all other config files, identifiers are any non-white string of characters.
+# on display, underscores will be replaced with spaces and anything at or after an asterisk '*' is omitted.
+# e.g. the id "CSCI_1170-01L*1" will be displayed as "CSCI 1170-01L".
+# however, you must use the full (technical) name in these config files.
+
+# 'course' introduces a new named course.
+# usage: course [id] [capacity] [notes...]
+# id must not contain white space - underscores can be used and will be replaced with spaces on display
+# capacity is the max number of students in said course (per section)
+# different sections are handled by technically being different courses: see below
+# if multiple rooms are required for a course (e.g. a lab) then it needs multiple courses: see below
+
+# 'require' adds a required room attribute to a pre-existing course
+# usage: require [id] [attr]...
+# attributes are defined by the (separate) rooms file.
+
+# 'parallel' specifies that a set of courses MUST take place at same time (e.g. class that needs two rooms).
+# usage: parallel [id]...
+# must specify 2+ courses and order does not matter.
+# note: this constraint is transitive.
+
+# 'orthogonal' specifies that a set of courses MUST be able to be taken together.
+# this means that these courses MUST NOT happen at same time as any other in the list.
+# this is the effective opposite of 'parallel'.
+# note: this constraint is NOT transitive.
+
+course 1010-01       80 Monday only Sarkar
+
+course 1150-01       30 Williams
+course 1150-01L      30 Williams
+course 1150-03       60 Gu
+course 1150-03L*1    30 Gu
+course 1150-03L*2    30 Gu
+course 1150-04       30 Gu
+course 1150-04L      30 Gu
+course 1150-05       30 Williams
+course 1150-05L      30 Williams
+course 1150-06       30 Smith
+course 1150-06L      30 Smith
+
+require 1150-01L   lab
+require 1150-03L*1 lab
+require 1150-03L*2 lab
+require 1150-04L   lab
+require 1150-05L   lab
+require 1150-06L   lab
+
+parallel 1150-01 1150-01L
+parallel 1150-03 1150-03L*1 1150-03L*2
+parallel 1150-04 1150-04L
+parallel 1150-05 1150-05L
+parallel 1150-06 1150-06L
+
+orthogonal 1150-01 1150-03 1150-04 1150-05 1150-06
+
+course 1170-01       50 Smith
+course 1170-01L*1    50 Smith
+course 1170-01L*2    50 Smith
+course 1170-02       50 Smith
+course 1170-02L*1    50 Smith
+course 1170-02L*2    50 Smith
+course 1170-03       30 Untch
+course 1170-03L      30 Untch
+course 1170-04       30 Mechatronics Li
+course 1170-04L      30 Mechatronics Li
+course 1170-05       30 Al-Tobasei
+course 1170-05L      30 Al-Tobasei
+
+require 1170-01L*1 lab
+require 1170-01L*2 lab
+require 1170-02L*1 lab
+require 1170-02L*2 lab
+require 1170-03L   lab
+require 1170-04L   lab
+require 1170-05L   lab
+
+orthogonal 1170-01 1170-02 1170-03 1170-04 1170-05
+
+course 2170-01       30 Aderholdt
+course 2170-01L*1    30 Aderholdt
+course 2170-01L*2    30 Aderholdt
+course 2170-02       30 Pettey
+course 2170-02L      30 Pettey
+course 2170-03       30 Untch
+course 2170-03L      30 Untch
+course 2170-04       30 Li
+course 2170-04L      30 Li
+course 2170-05       30 Untch
+course 2170-05L      30 Untch
+
+require 2170-01L*1 lab
+require 2170-01L*2 lab
+require 2170-02L   lab
+require 2170-03L   lab
+require 2170-04L   lab
+require 2170-05L   lab
+
+parallel 2170-01L*1 2170-01L*2
+
+orthogonal 2170-01 2170-02 2170-03 2170-04 2170-05
+
+course 3037-01       50 Al-Tobasei
+course 3080-01       80 Pettey
+course 3110-01       50 Barbosa
+
+course 3130-01       80 Phillips
+course 3130-01L*1    30 Tuesday only Phillips
+course 3130-01L*2    30 Tuesday only Phillips
+course 3130-01L*3    30 Tuesday only Phillips
+course 3130-01L*4    30 Tuesday only Phillips
+
+require 3130-01L*1 lab
+require 3130-01L*2 lab
+require 3130-01L*3 lab
+require 3130-01L*4 lab
+
+course 3160-01       30 Seo
+course 3160-01L      30 Seo
+
+require 3160-01L lab
+
+course 3210-01       30 Dong
+
+course 3240/6050-01  50 Butler
+course 3240/6050-01L 50 Butler
+
+require 3240/6050-01L lab
+
+course 4/5160-01     50 Dong
+course 4/5360-01     30 Li
+course 4/5410-01     30 Butler
+course 4/5850-01     30 Phillips
+course 4/5700-01     50 Sarkar
+
+course 3180-01       30 Seo
+course 3180-01L      30 Seo
+
+require 3180-01L lab
+
+course 6300-01       30 Gu
+course 6350-01       30 Barbosa
+course 6430-01       30 Aderholdt
+course 6620-01       30 Seo
+
+course PHIL_3170-01  30 Johnson
+course PHIL_3170-02  30 Johnson
+
+# courses that are recommended to be taken together must be orthogonal
+orthogonal 3130-01 3080-01
+orthogonal 3110-01 3240/6050-01
+
+# (some) electives should be in orthogonal subsets to provide diverse options
+orthogonal 3037-01 3160-01
