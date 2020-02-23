@@ -79,6 +79,15 @@ require 1170-05L   lab
 
 orthogonal 1170-01 1170-02 1170-03 1170-04 1170-05
 
+parallel 1170-01L*1 1170-01L*2
+parallel 1170-02L*1 1170-02L*2
+
+follows 1170-01 1170-01L*1
+follows 1170-02 1170-02L*1
+follows 1170-03 1170-03L
+follows 1170-04 1170-04L
+follows 1170-05 1170-05L
+
 course 2170-01       30 Aderholdt
 course 2170-01L*1    30 Aderholdt
 course 2170-01L*2    30 Aderholdt
@@ -98,9 +107,15 @@ require 2170-03L   lab
 require 2170-04L   lab
 require 2170-05L   lab
 
+orthogonal 2170-01 2170-02 2170-03 2170-04 2170-05
+
 parallel 2170-01L*1 2170-01L*2
 
-orthogonal 2170-01 2170-02 2170-03 2170-04 2170-05
+follows 2170-01 2170-01L*1
+follows 2170-02 2170-02L
+follows 2170-03 2170-03L
+follows 2170-04 2170-04L
+follows 2170-05 2170-05L
 
 course 3037-01       50 Al-Tobasei
 course 3080-01       80 Pettey
@@ -117,10 +132,17 @@ require 3130-01L*2 lab
 require 3130-01L*3 lab
 require 3130-01L*4 lab
 
+parallel 3130-01L*1 3130-01L*2
+parallel 3130-01L*3 3130-01L*4
+
+follows 3130-01L*1 3130-01L*3
+
 course 3160-01       30 Seo
 course 3160-01L      30 Seo
 
 require 3160-01L lab
+
+parallel 3160-01 3160-01L
 
 course 3210-01       30 Dong
 
@@ -128,6 +150,8 @@ course 3240/6050-01  50 Butler
 course 3240/6050-01L 50 Butler
 
 require 3240/6050-01L lab
+
+follows 3240/6050-01 3240/6050-01L
 
 course 4/5160-01     50 Dong
 course 4/5360-01     30 Li
@@ -140,6 +164,8 @@ course 3180-01L      30 Seo
 
 require 3180-01L lab
 
+parallel 3180-01 3180-01L
+
 course 6300-01       30 Gu
 course 6350-01       30 Barbosa
 course 6430-01       30 Aderholdt
@@ -147,6 +173,8 @@ course 6620-01       30 Seo
 
 course PHIL_3170-01  30 Johnson
 course PHIL_3170-02  30 Johnson
+
+orthogonal PHIL_3170-01 PHIL_3170-02
 
 # courses that are recommended to be taken together must be orthogonal
 orthogonal 3130-01 3080-01

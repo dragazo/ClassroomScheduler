@@ -15,6 +15,8 @@
 #include <sstream>
 #include <optional>
 #include <list>
+#include <stdexcept>
+#include <memory>
 
 void print_time(std::ostream &ostr, int time)
 {
@@ -76,6 +78,7 @@ struct course_info
 	std::set<std::string> required_attrs;     // list of all required room attributes for this course
 	std::set<std::string> parallel_courses;   // list of all parallel courses (id)
 	std::set<std::string> orthogonal_courses; // list of all orthogonal courses (id)
+	std::set<std::string> follow_courses;     // list of all courses that must immediately follow this one
 };
 
 // skips white space but stops on new line characters (extracts it).
@@ -300,6 +303,29 @@ std::variant<std::unordered_map<std::string, course_info>, std::string> read_cou
 				}
 			}
 		}
+		else if (str == "follows")
+		{
+			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected course id";
+			f >> str;
+			assert(f); // guaranteed to succeed from above
+
+			// find the course being constrained (first)
+			auto first = courses.find(str);
+			if (first == courses.end()) return std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str;
+
+			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected a second course id";
+			f >> str;
+			assert(f); // guaranteed to succeed from above
+
+			// find the course being constrained (second)
+			auto second = courses.find(str);
+			if (second == courses.end()) return std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str;
+
+			if (!line_term() && f) return std::string(path) + ':' + std::to_string(ln) + " - expected only two arguments";
+
+			// apply the constraint
+			first->second.follow_courses.insert(second->first);
+		}
 		else return std::string(path) + ':' + std::to_string(ln) + " - unrecognized command: " + str;
 	}
 
@@ -312,59 +338,221 @@ struct satisfy_info
 	std::vector<schedule> &schedules;
 	const std::unordered_map<std::string, course_info> &courses;
 
-	std::list<std::set<std::string>> parallel_sets; // list of parallel course sets
+	std::list<std::set<std::string>>                                            parallel_sets;          // list of parallel course sets
+	std::unordered_map<std::string, std::list<std::set<std::string>>::iterator> course_to_parallel_set; // maps each course to its proper parallel set
+
+	std::unordered_map<const std::set<std::string>*, const std::set<std::string>*> follow_psets;  // maps a pset to its follow pset (if any)
+	
+	std::unordered_set<const std::set<std::string>*> visited; // set of all psets that have been visited
 
 	satisfy_info(const std::vector<room> &r, std::vector<schedule> &s, const std::unordered_map<std::string, course_info> &c) : rooms(r), schedules(s), courses(c)
 	{
-		// construct the parallel topology object for generative iteration
+		// construct the trivial form of the parallel topology structure - just a bunch of bookmarked singletons
 		for (const auto &entry : c)
 		{
-			auto p_pos = entry.second.parallel_courses.begin();
-			const auto p_end = entry.second.parallel_courses.end();
-			bool inserted = false;
-
-			// for the current course, iterate through all its parallel courses (p)
-			for (; p_pos != p_end; ++p_pos)
-			{
-				// look for a parallel set that contains p
-				auto it = std::find_if(parallel_sets.begin(), parallel_sets.end(), [&](const auto &x) { return x.find(*p_pos) != x.end(); });
-				if (it != parallel_sets.end())
-				{
-					// insert ourself into the matching parallel set
-					it->insert(entry.first);
-					inserted = true;
-
-					// continue iterating through all the rest of the parallel courses (p) - we know previous ones failed to match any parallel sets
-					for (++p_pos; p_pos != p_end; ++p_pos)
-					{
-						// look for anoter parallel set that contains p
-						auto other = std::find_if(parallel_sets.begin(), parallel_sets.end(), [&](const auto &x) { return x.find(*p_pos) != x.end(); });
-						if (other != parallel_sets.end() && other != it)
-						{
-							// if we found another match elsewhere, merge into this one and erase it - this gives us transitive parallel constraints
-							it->merge(*other);
-							parallel_sets.erase(other);
-							std::cout << "performed a merge!\n";
-						}
-					}
-
-					break;
-				}
-			}
-			// if we reached the end of the container then there was no matching parallel set - create one and put ourself in it
-			if (!inserted) parallel_sets.emplace_back().insert(entry.first);
+			parallel_sets.emplace_back().insert(entry.first);
+			course_to_parallel_set[entry.first] = std::prev(parallel_sets.end());
 		}
 
-		//parallel_sets.sort([](const auto &a, const auto &b) { return a.size() > b.size(); });
+		// now apply all parallel constraints
+		for (auto pos = parallel_sets.begin(); pos != parallel_sets.end(); )
+		{
+			bool merged = false;
+
+			// for each course in the current parallel set
+			for (const auto &p : *pos)
+			{
+				// for each parallel constraint
+				for (const auto &pp : c.at(p).parallel_courses)
+				{
+					// get its parallel set - if it's us skip it
+					auto it = course_to_parallel_set.at(pp);
+					if (it == pos) continue;
+
+					// merge it into our parallel set and account for all mapping updates
+					for (const auto &ppp : *it) course_to_parallel_set[ppp] = pos;
+					pos->merge(*it);
+					parallel_sets.erase(it);
+					merged = true;
+				}
+				if (merged) break; // by changing the pos set (which we're iterating over), we've invalidated the iterator and need to stop iteration (and repeat current set until no more merges)
+			}
+
+			if (!merged) ++pos; // if we didn't perform any merges we're done with this position, otherwise repeat current position
+		}
+		
+		std::vector<std::list<std::set<std::string>>::iterator> fset;
+		bool fmerge;
+
+		// now resolve many to one follow dependencies - we can also generate the root follow chains simultaneously
+		do
+		{
+			fmerge = false;
+
+			for (const auto &pset : parallel_sets)
+			{
+				fset.clear(); // clear this for reuse (is the set of all psets that have us as a follow set)
+
+				for (auto other = parallel_sets.begin(); other != parallel_sets.end(); ++other)
+				{
+					bool inserted = false;
+					for (const auto &p : *other)
+					{
+						for (const auto &pp : c.at(p).follow_courses)
+						{
+							// get the follow pset
+							auto val = course_to_parallel_set[pp];
+							// if it's us, add it to the fset
+							if (&*val == &pset)
+							{
+								fset.push_back(other); // insert into fset and move on to next other pset (this ensures that fset has no duplicates)
+								inserted = true;
+								break;
+							}
+						}
+						if (inserted) break; // propagate break request
+					}
+				}
+
+				// if there aren't enough to merge, move on to next pset
+				if (fset.size() < 2) continue;
+
+				// merge all the fsets into one parallel set
+				const auto dest = fset[0];
+				for (std::size_t i = 1; i < fset.size(); ++i)
+				{
+					for (const auto &g : *fset[i]) course_to_parallel_set[g] = dest;
+					dest->merge(*fset[i]);
+					parallel_sets.erase(fset[i]);
+				}
+
+				// we modified the list we're iterating over and need to restart from the beginning until there are no more chances
+				fmerge = true;
+				break;
+			}
+		} while (fmerge);
+
+		// condence heterogenous follow parallel constraints - we can also generate the follow set map simultaneously
+		// this resolves one to many follow constraints
+		do
+		{
+			fmerge = false;
+			follow_psets.clear(); // clear follow pset map to undo invalidated info from previous runs
+
+			// for each parallel set
+			for (const auto &pset : parallel_sets)
+			{
+				// generate the fset
+				fset.clear();
+				for (const auto &i : pset)
+					for (const auto &j : c.at(i).follow_courses)
+					{
+						auto val = course_to_parallel_set.at(j);
+						if (std::find(fset.begin(), fset.end(), val) == fset.end()) fset.push_back(val); // add to fset but don't take duplicates
+					}
+				
+				// if there's not enough to merge, skip to next iteration - but if there's exactly 1 item link it in the follow psets map as well
+				if (fset.size() == 0) continue;
+				else if (fset.size() == 1) { follow_psets[&pset] = &*fset[0]; continue; }
+				
+				// merge all the fsets into one parallel set
+				const auto dest = fset[0];
+				for (std::size_t i = 1; i < fset.size(); ++i)
+				{
+					for (const auto &g : *fset[i]) course_to_parallel_set[g] = dest;
+					dest->merge(*fset[i]);
+					parallel_sets.erase(fset[i]);
+				}
+
+				// we modified the list we're iterating over and need to restart from the beginning until there are no more chances
+				fmerge = true;
+				break;
+			}
+		} while (fmerge);
+
+		// now we need to find the length of all follow chains
+		std::unordered_map<const std::set<std::string>*, std::size_t> pset_to_follow_chain_length;
+		std::vector<const std::set<std::string>*> follow_chain;
+
+		// for each pset
+		for (auto pos = parallel_sets.begin(); pos != parallel_sets.end(); ++pos)
+		{
+			// if this pset has already been accounted for skip it
+			if (pset_to_follow_chain_length.find(&*pos) != pset_to_follow_chain_length.end()) continue;
+
+			follow_chain.clear(); // clear follow chain for reuse
+
+			// generate the follow chain
+			for (const std::set<std::string> *p = &*pos; p; )
+			{
+				// if it's already in the follow chain then this is a cyclic dependency
+				if (std::find(follow_chain.begin(), follow_chain.end(), p) != follow_chain.end()) throw std::logic_error("cyclic follows dependency encountered");
+				follow_chain.push_back(p);
+
+				// get the follow pset (next in the chain)
+				auto it = follow_psets.find(p);
+				p = it != follow_psets.end() ? it->second : nullptr;
+			}
+
+			// update follow chain lengths
+			for (std::size_t i = 0; i < follow_chain.size(); ++i)
+			{
+				auto old_len = pset_to_follow_chain_length[follow_chain[i]];
+				pset_to_follow_chain_length[follow_chain[i]] = std::max(old_len, follow_chain.size() - i); // due to arbitrary iteration order, we just need to take the max found length for each pset
+			}
+		}
+
+		// we'll traverse the psets in the same order as we exit from this constructor.
+		// in order to guarantee follow constraints are always satisfied we need to make sure that follow chain roots come before other items in their chain.
+		// for this it is sufficient to sort by descending follow chain length - we already know that follow chains are disjoint.
+		parallel_sets.sort([&](const auto &a, const auto &b) {
+			auto x = pset_to_follow_chain_length.at(&a);
+			auto y = pset_to_follow_chain_length.at(&b);
+
+			return x > y || x == y && a.size() > b.size(); // we arbitrarily break ties with pset size - not required for constraint validity, but could improve performance
+		});
+		
+		// sanity check
+		for (const auto &entry : c)
+		{
+			auto &set = *course_to_parallel_set.at(entry.first);
+			assert(set.find(entry.first) != set.end());
+		}
+
+		std::cerr << "course topology: " << parallel_sets.size() << '\n';
+		for (const auto &entry : parallel_sets)
+		{
+			std::cerr << "[ " << std::setw(2) << pset_to_follow_chain_length.at(&entry) << " ]";
+			for (const auto &s : entry) std::cerr << ' ' << std::setw(16) << s;
+			std::cerr << '\n';
+		}
+		std::cerr << '\n';
 	}
 };
-bool _satisfy_recursive(satisfy_info &p, std::list<std::set<std::string>>::const_iterator pset, timeslot &slot, std::set<std::string>::const_iterator pset_item)
+bool satisfy_pset_recursive_base(satisfy_info &p, std::list<std::set<std::string>>::const_iterator pset);
+bool satisfy_pset_recursive_init(satisfy_info &p, schedule &sched, const std::size_t slot_i, const std::list<std::set<std::string>>::const_iterator pset_root, const std::set<std::string> *const pset);
+bool satisfy_pset_recursive_interior(satisfy_info &p, schedule &sched, const std::size_t slot_i, std::list<std::set<std::string>>::const_iterator pset_root, const std::set<std::string> *const pset, std::set<std::string>::const_iterator ppos)
 {
 	// if we're at the end of the current pset, we're done with this pset
-	assert(pset != p.parallel_sets.end());
-	if (pset_item == pset->end()) return true;
+	if (ppos == pset->end())
+	{
+		// get the follow pset - if it exists then we need to recurse to it on the next slot
+		if (auto it = p.follow_psets.find(pset); it != p.follow_psets.end())
+		{
+			// if there is no next slot, this is a failure
+			if (slot_i + 1 >= sched.slots.size()) return false;
 
-	const auto &course = p.courses.at(*pset_item);
+			// otherwise recurse into the follow pset
+			return satisfy_pset_recursive_init(p, sched, slot_i + 1, pset_root, it->second);
+		}
+
+		// we successfully scheduled this pset and all of its (recursive) follow constraints - on to next non-follow pset from root order (get next nonvisited)
+		for (++pset_root; pset_root != p.parallel_sets.end() && p.visited.find(&*pset_root) != p.visited.end(); ++pset_root) {}
+		return satisfy_pset_recursive_base(p, pset_root);
+	}
+
+	const auto &course = p.courses.at(*ppos);
+	timeslot   &slot = sched.slots[slot_i];
 
 	// attempt to put it into each available room
 	for (std::size_t k = 0; k < slot.assignments.size(); ++k)
@@ -399,10 +587,10 @@ bool _satisfy_recursive(satisfy_info &p, std::list<std::set<std::string>>::const
 		// ----------------------------------------------------------------
 
 		// assign current course to this schedule, timeslot, and room
-		slot.assignments[k] = *pset_item;
+		slot.assignments[k] = *ppos;
 
 		// perform the recursive step - if we succeed, propagate up
-		if (_satisfy_recursive(p, pset, slot, std::next(pset_item))) return true;
+		if (satisfy_pset_recursive_interior(p, sched, slot_i, pset_root, pset, std::next(ppos))) return true;
 
 		// otherwise undo the change and continue searching
 		slot.assignments[k].clear();
@@ -410,23 +598,27 @@ bool _satisfy_recursive(satisfy_info &p, std::list<std::set<std::string>>::const
 
 	return false;
 }
-bool _satisfy_recursive(satisfy_info &p, std::list<std::set<std::string>>::const_iterator pset)
+bool satisfy_pset_recursive_init(satisfy_info &p, schedule &sched, const std::size_t slot_i, const std::list<std::set<std::string>>::const_iterator pset_root, const std::set<std::string> *const pset)
 {
-	// if we're at the end of the parallel sets, we're done
+	// recurse to interior with a backtracking visited marker - if the insertion fails (already present) then it was a cyclic dependency
+	if (!p.visited.insert(pset).second) return false;
+	if (satisfy_pset_recursive_interior(p, sched, slot_i, pset_root, pset, pset->begin())) return true;
+	p.visited.erase(pset);
+	return false;
+}
+bool satisfy_pset_recursive_base(satisfy_info &p, std::list<std::set<std::string>>::const_iterator pset)
+{
+	// if we're at the end of the parallel sets, we're done and have scheduled everything (yay)
 	if (pset == p.parallel_sets.end()) return true;
-
-	// attempt to put current course set into each schedule
+	
+	// otherwise attempt to put current pset into each schedule
 	for (auto &sched : p.schedules)
 	{
 		// and into each timeslot in said schedule
-		for (auto &slot : sched.slots)
+		for (std::size_t slot_i = 0; slot_i < sched.slots.size(); ++slot_i)
 		{
-			// if we can setisfy this pset with this slot
-			if (_satisfy_recursive(p, pset, slot, pset->begin()))
-			{
-				// recurse to handle the next pset - if it succeeds, propagate back up
-				if (_satisfy_recursive(p, std::next(pset))) return true;
-			}
+			// if we can satisfy this pset with this slot
+			if (satisfy_pset_recursive_init(p, sched, slot_i, pset, &*pset)) return true;
 		}
 	}
 
@@ -445,9 +637,13 @@ bool satisfy(const std::vector<room> &rooms, std::vector<schedule> &schedules, c
 		}
 	}
 
-	// create info object and begin recursive solve strategy
-	satisfy_info p{ rooms, schedules, courses };
-	return _satisfy_recursive(p, p.parallel_sets.begin());
+	// create info object - if it throws that means there were impossible constraints
+	std::unique_ptr<satisfy_info> p;
+	try { p = std::make_unique<satisfy_info>(rooms, schedules, courses); }
+	catch (const std::logic_error & e) { std::cerr << "ERROR: " << e.what() << "\n\n"; return false; }
+
+	// recurse to satisfy all course assignments
+	return satisfy_pset_recursive_base(*p, p->parallel_sets.begin());
 }
 
 void print_schedule_latex(std::ostream &ostr, const std::vector<room> &rooms, const schedule &sched, const std::unordered_map<std::string, course_info> &courses)
