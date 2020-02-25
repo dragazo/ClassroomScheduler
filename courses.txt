@@ -27,15 +27,17 @@
 # this is the effective opposite of 'parallel'.
 # note: this constraint is NOT transitive.
 
-course 1010-01       80 Monday only Sarkar
+course 1010-01       80 Sarkar M only
+
+schedule 1010-01 MWF
 
 course 1150-01       30 Williams
 course 1150-01L      30 Williams
-course 1150-03       60 Gu
-course 1150-03L*1    30 Gu
-course 1150-03L*2    30 Gu
-course 1150-04       30 Gu
-course 1150-04L      30 Gu
+course 1150-03       60 Gu MW only
+course 1150-03L*1    30 Gu MW only
+course 1150-03L*2    30 Gu MW only
+course 1150-04       30 Gu MW only
+course 1150-04L      30 Gu MW only
 course 1150-05       30 Williams
 course 1150-05L      30 Williams
 course 1150-06       30 Smith
@@ -54,6 +56,9 @@ parallel 1150-04 1150-04L
 parallel 1150-05 1150-05L
 parallel 1150-06 1150-06L
 
+schedule 1150-03 MWF
+schedule 1150-04 MWF
+
 orthogonal 1150-01 1150-03 1150-04 1150-05 1150-06
 
 course 1170-01       50 Smith
@@ -62,10 +67,10 @@ course 1170-01L*2    50 Smith
 course 1170-02       50 Smith
 course 1170-02L*1    50 Smith
 course 1170-02L*2    50 Smith
-course 1170-03       30 Untch
-course 1170-03L      30 Untch
-course 1170-04       30 Mechatronics Li
-course 1170-04L      30 Mechatronics Li
+course 1170-03       30 Untch MW only
+course 1170-03L      30 Untch MW only
+course 1170-04       30 Li Mechatronics
+course 1170-04L      30 Li Mechatronics
 course 1170-05       30 Al-Tobasei
 course 1170-05L      30 Al-Tobasei
 
@@ -88,11 +93,13 @@ follows 1170-03 1170-03L
 follows 1170-04 1170-04L
 follows 1170-05 1170-05L
 
-course 2170-01       30 Aderholdt
-course 2170-01L*1    30 Aderholdt
-course 2170-01L*2    30 Aderholdt
-course 2170-02       30 Pettey
-course 2170-02L      30 Pettey
+schedule 1170-03 MWF
+
+course 2170-01       30 Aderholdt MW only
+course 2170-01L*1    30 Aderholdt MW only
+course 2170-01L*2    30 Aderholdt MW only
+course 2170-02       30 Pettey MW only
+course 2170-02L      30 Pettey MW only
 course 2170-03       30 Untch
 course 2170-03L      30 Untch
 course 2170-04       30 Li
@@ -117,15 +124,18 @@ follows 2170-03 2170-03L
 follows 2170-04 2170-04L
 follows 2170-05 2170-05L
 
+schedule 2170-01 MWF
+schedule 2170-02 MWF
+
 course 3037-01       50 Al-Tobasei
 course 3080-01       80 Pettey
 course 3110-01       50 Barbosa
 
 course 3130-01       80 Phillips
-course 3130-01L*1    30 Tuesday only Phillips
-course 3130-01L*2    30 Tuesday only Phillips
-course 3130-01L*3    30 Tuesday only Phillips
-course 3130-01L*4    30 Tuesday only Phillips
+course 3130-01L*1    30 Phillips T only
+course 3130-01L*2    30 Phillips T only
+course 3130-01L*3    30 Phillips T only
+course 3130-01L*4    30 Phillips T only
 
 require 3130-01L*1 lab
 require 3130-01L*2 lab
@@ -137,6 +147,8 @@ parallel 3130-01L*3 3130-01L*4
 
 follows 3130-01L*1 3130-01L*3
 
+schedule 3130-01 TR
+
 course 3160-01       30 Seo
 course 3160-01L      30 Seo
 
@@ -144,7 +156,9 @@ require 3160-01L lab
 
 parallel 3160-01 3160-01L
 
-course 3210-01       30 Dong
+course 3210-01       30 Dong MW only
+
+schedule 3210-01 MWF
 
 course 3240/6050-01  50 Butler
 course 3240/6050-01L 50 Butler
@@ -153,11 +167,14 @@ require 3240/6050-01L lab
 
 follows 3240/6050-01 3240/6050-01L
 
-course 4/5160-01     50 Dong
+course 4/5160-01     50 Dong MW only
 course 4/5360-01     30 Li
 course 4/5410-01     30 Butler
 course 4/5850-01     30 Phillips
-course 4/5700-01     50 Sarkar
+course 4/5700-01     50 Sarkar MW only
+
+schedule 4/5700-01 MWF
+schedule 4/5160-01 MWF
 
 course 3180-01       30 Seo
 course 3180-01L      30 Seo
@@ -166,10 +183,13 @@ require 3180-01L lab
 
 parallel 3180-01 3180-01L
 
-course 6300-01       30 Gu
+course 6300-01       30 Gu MW only
 course 6350-01       30 Barbosa
-course 6430-01       30 Aderholdt
+course 6430-01       30 Aderholdt MW only
 course 6620-01       30 Seo
+
+schedule 6300-01 MWF
+schedule 6430-01 MWF
 
 course PHIL_3170-01  30 Johnson
 course PHIL_3170-02  30 Johnson
