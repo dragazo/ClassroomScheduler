@@ -30,6 +30,11 @@ std::string tostr(Args &&...args)
 	(ss << ... << std::forward<Args>(args));
 	return ss.str();
 }
+std::string to_lower(std::string s)
+{
+	for (char &ch : s) ch = std::tolower((unsigned char)ch);
+	return s;
+}
 std::string fix_id(std::string s)
 {
 	for (char &ch : s) if (ch == '_') ch = ' ';
@@ -79,6 +84,18 @@ struct course_info
 
 	std::string schedule; // if present, this is the id of the schedule that this course MUST be in
 };
+struct constraint_set
+{
+	// rooms and scheudles are backed by lists rather than just thrown into unordered_map directly because iteration order matters.
+	// for rooms, we need to output the schedule table in a predictable order - for schedules we need to attempt to schedule courses in a predictable way.
+
+	std::list<room>     rooms;     // a list of all the rooms
+	std::list<schedule> schedules; // a list of all the schedules
+
+	std::unordered_map<std::string, room*>       rooms_map;     // maps from room id to the room
+	std::unordered_map<std::string, schedule*>   schedules_map; // maps from schedule id to the schedule
+	std::unordered_map<std::string, course_info> courses;       // a list of all courses - maps id to course info
+};
 
 // skips white space but stops on new line characters (extracts it).
 // returns true if stopped due to new line character.
@@ -105,106 +122,271 @@ bool parse_time(std::istream &f, int &dest)
 	dest = (int)(60 * t1 + t2);
 	return true;
 }
-bool parse_time_range(std::ifstream &f, timespan &span)
+bool parse_time_range(std::istream &f, timespan &span)
 {
 	return parse_time(f, span.start) && f.get() == '-' && parse_time(f, span.stop);
 }
 
-auto make_line_term(std::istream &f, int &line_number)
+struct line_term_t
 {
-	return [&] {
-		if (skipws(f)) // skip white space - if we hit a new line char we're done with this line
+	std::istream &file;
+	int line_number;
+
+	bool operator()()
+	{
+		if (skipws(file)) // skip white space - if we hit a new line char we're done with this line
 		{
 			++line_number;
 			return true;
 		}
-		if (f.peek() == '#') // if next char starts a comment, skip past comment and on to next line
+		if (file.peek() == '#') // if next char starts a comment, skip past comment and on to next line
 		{
-			f.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+			file.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 			++line_number;
 			return true;
 		}
 		return false;
-	};
-}
-
-std::variant<std::vector<room>, std::string> read_rooms(const char *path)
+	}
+};
+struct constraint_parser_pack
 {
-	std::ifstream f{ path };
-	if (!f) return std::string("failed to open ") + path + " for reading";
+	constraint_set c;
+	std::set<std::string> str_set;
+	std::string str, err;
+	std::istream &f;
+	const char *const path;
+	int ln;
+	line_term_t line_term;
 
-	std::vector<room> rooms;
-	int line_number = 1;
-	auto line_term = make_line_term(f, line_number);
+	constraint_parser_pack(std::istream &file, const char *p) : f(file), line_term{ f, 1 }, ln(1), path(p) {}
 
-	while (true)
+	bool _parse_room()
 	{
-		if (line_term()) continue; // if this is line term, line was empty (skip)
-		if (!f) { assert(f.eof()); break; } // this happens at eof
-		const int ln = line_number;
-		room &r = rooms.emplace_back();
-
-		f >> r.id;
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected room id"; return false; }
+		f >> str;
 		assert(f); // guaranteed to succeed from above
-		if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - encountered incomplete room entry";
-		if (!(f >> r.capacity)) return std::string(path) + ':' + std::to_string(ln) + " - failed to parse room capacity";
 
+		// make sure a room with the same name doesn't already exist
+		if (c.courses.find(str) != c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - a room with this id already exists"; return false; }
+
+		// create the new room and link to to the lookup table
+		room &r = c.rooms.emplace_back();
+		r.id = str;
+		c.rooms_map.emplace(std::move(str), &r);
+
+		// parse capacity
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected room capacity"; return false; }
+		if (!(f >> r.capacity)) { err = std::string(path) + ':' + std::to_string(ln) + " - failed to parse room capacity"; return false; }
+		if (int ch = f.peek(); ch != EOF && !std::isspace((unsigned char)ch)) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected character encountered in room capacity"; return false; }
+
+		// parse (optional) attributes
+		while (!line_term() && f)
+		{
+			f >> str;
+			assert(f); // guaranteed to succeed from above
+			r.attr.insert(std::move(str));
+		}
+
+		return true;
+	}
+	bool _parse_timeslot()
+	{
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected schedule id"; return false; }
+		f >> str;
+		assert(f); // guaranteed to succeed from above
+
+		// get the schedule being modified - if it doesn't already exist create it
+		auto it = c.schedules_map.find(str);
+		if (it == c.schedules_map.end())
+		{
+			schedule &s = c.schedules.emplace_back();
+			s.id = str;
+			it = c.schedules_map.emplace(std::move(str), &s).first;
+		}
+
+		timeslot slot;
+
+		// parse time points
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - encountered incomplete schedule entry"; return false; }
+		if (!parse_time_range(f, slot.time)) { err = std::string(path) + ':' + std::to_string(ln) + " - failed to parse schedule time"; return false; }
+		if (!line_term() && f) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected tokens encountered after schedule time"; return false; }
+
+		// insert it into the schedule in sorted order
+		auto pos = std::lower_bound(it->second->slots.begin(), it->second->slots.end(), slot, [](const auto &a, const auto &b) { return a.time.start < b.time.start; });
+		it->second->slots.insert(pos, std::move(slot));
+
+		return true;
+	}
+	bool _parse_course()
+	{
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected course id"; return false; }
+		f >> str;
+		assert(f); // guaranteed to succeed from above
+
+		// insert a new course into the set (make sure it doesn't already exist)
+		if (c.courses.find(str) != c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to respecify existing course: " + str; return false; }
+		course_info &info = c.courses[std::move(str)];
+
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected course capacity"; return false; }
+		if (!(f >> info.capacity)) { err = std::string(path) + ':' + std::to_string(ln) + " - failed to parse course capacity"; return false; }
+
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected instructor id"; return false; }
+		f >> info.instructor;
+		assert(f); // guaranteed to succeed from above
+
+		if (!line_term() && f) // if we have extra stuff it's notes for the course
+		{
+			std::getline(f, info.notes);
+			assert(f); // guaranteed to succeed from above
+			++line_term.line_number; // bump this up to account for getline() consuming the newline char
+			if (auto p = info.notes.find('#'); p != std::string::npos) info.notes.erase(p); // remove comment from end of string (if present)
+			info.notes.erase(info.notes.find_last_not_of(" \t\n\r\v\f") + 1); // trim white space from end of string
+		}
+
+		return true;
+	}
+	bool _parse_requires()
+	{
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected course id"; return false; }
+		f >> str;
+		assert(f); // guaranteed to succeed from above
+
+		// find the course being constrained
+		auto it = c.courses.find(str);
+		if (it == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
+
+		// gather all the tokens
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected one or more room attributes"; return false; }
+		do
+		{
+			f >> str;
+			assert(f); // guaranteed to succeed from above
+			it->second.required_attrs.insert(std::move(str)); // add requirement (duplicates are no-op)
+		} while (!line_term() && f);
+
+		return true;
+	}
+	bool _parse_parallel_orthogonal()
+	{
+		// parse the course list
+		str_set.clear();
 		while (!line_term() && f)
 		{
 			std::string s;
 			f >> s;
 			assert(f); // guaranteed to succeed from above
-			r.attr.insert(std::move(s));
+			if (c.courses.find(s) == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + s; return false; }
+			str_set.insert(std::move(s));
 		}
+		if (str_set.size() < 2) { err = std::string(path) + ':' + std::to_string(ln) + " - expected two or more course ids"; return false; }
+
+		// we handle parallel and orthogonal with same code - use this to separate the semantics
+		const auto bucket = str == "parallel" ? &course_info::parallel_courses : &course_info::orthogonal_courses;
+
+		// apply constraints
+		for (auto &dest_id : str_set)
+		{
+			auto &dest = c.courses.at(dest_id).*bucket; // get the destination set
+			for (auto &constraint : str_set) if (&dest_id != &constraint)
+			{
+				dest.insert(constraint); // add all other constraints to dest
+			}
+		}
+
+		return true;
 	}
-
-	if (rooms.empty()) return std::string(path) + " - no rooms were defined";
-
-	return std::move(rooms);
-}
-std::variant<std::list<schedule>, std::string> read_schedules(const char *path)
-{
-	std::ifstream f{ path };
-	if (!f) return std::string("failed to open ") + path + " for reading";
-
-	std::list<schedule> schedules;
-	std::string str;
-	int line_number = 1;
-	auto line_term = make_line_term(f, line_number);
-
-	// parse all the schedule data
-	while (true)
+	bool _parse_follows()
 	{
-		if (line_term()) continue; // if this is line term, line was empty (skip)
-		if (!f) { assert(f.eof()); break; } // this happens at eof
-		const int ln = line_number;
-		timeslot slot;
-
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected course id"; return false; }
 		f >> str;
 		assert(f); // guaranteed to succeed from above
-		if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - encountered incomplete schedule entry";
-		if (!parse_time_range(f, slot.time)) return std::string(path) + ':' + std::to_string(ln) + " - failed to parse schedule time";
-		if (!line_term() && f) return std::string(path) + ':' + std::to_string(ln) + " - unexpected tokens encountered after schedule time";
 
-		// find the schedule with the specified name
-		auto it = std::find_if(schedules.begin(), schedules.end(), [&](const auto &x) { return x.id == str; });
-		// if it didn't exist, create it
-		if (it == schedules.end())
-		{
-			schedules.emplace_back().id = std::move(str);
-			it = std::prev(schedules.end());
-		}
+		// find the course being constrained (first)
+		auto first = c.courses.find(str);
+		if (first == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
 
-		// insert it into the schedule in sorted order
-		auto pos = std::lower_bound(it->slots.begin(), it->slots.end(), slot, [](const auto &a, const auto &b) { return a.time.start < b.time.start; });
-		it->slots.insert(pos, std::move(slot));
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected a second course id"; return false; }
+		f >> str;
+		assert(f); // guaranteed to succeed from above
+
+		// find the course being constrained (second)
+		auto second = c.courses.find(str);
+		if (second == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
+
+		if (!line_term() && f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected only two arguments"; return false; }
+
+		// apply the constraint
+		first->second.follow_courses.insert(second->first);
+
+		return true;
+	}
+	bool _parse_schedule()
+	{
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected course id"; return false; }
+		f >> str;
+		assert(f); // guaranteed to succeed from above
+
+		// find the course being constrained
+		auto it = c.courses.find(str);
+		if (it == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
+
+		// get the schedule id
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected a schedule id"; return false; }
+		f >> str;
+		assert(f); // guaranteed to succeed from above
+
+		// if there's already a schedule constraint for this course and they differ, it's a problem
+		std::string &sch = it->second.schedule;
+		if (!sch.empty() && sch != str) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to override pre-existing schedule constraint: " + sch + " -> " + str; return false; }
+
+		// if this is an unknown course, it's a problem
+		if (c.schedules_map.find(str) == c.schedules_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - reference to undefined schedule: " + str; return false; }
+		sch = str; // apply the constraint
+
+		return true;
+	}
+};
+std::unordered_map<std::string, bool(constraint_parser_pack::*)()> parse_handlers
+{
+	{ "room", &constraint_parser_pack::_parse_room },
+{ "timeslot", &constraint_parser_pack::_parse_timeslot },
+{ "course", &constraint_parser_pack::_parse_course },
+{ "requires", &constraint_parser_pack::_parse_requires },
+{ "parallel", &constraint_parser_pack::_parse_parallel_orthogonal },
+{ "orthogonal", &constraint_parser_pack::_parse_parallel_orthogonal },
+{ "follows", &constraint_parser_pack::_parse_follows },
+{ "schedule", &constraint_parser_pack::_parse_schedule },
+};
+std::variant<constraint_set, std::string> read_constraints(std::istream &f, const char *path)
+{
+	constraint_parser_pack p{ f, path };
+
+	// parse all the course data
+	while (true)
+	{
+		if (p.line_term()) continue; // if this is line term, line was empty (skip)
+		if (!f) { assert(f.eof()); break; } // this happens at eof
+		p.ln = p.line_term.line_number;
+
+		f >> p.str;
+		p.str = to_lower(std::move(p.str)); // convert instruction to lowercase to be case invariant
+		assert(f); // guaranteed to succeed from above
+
+		// get the parse handler - if it doesn't exist unknown command - otherwise execute
+		auto it = parse_handlers.find(p.str);
+		if (it == parse_handlers.end()) return std::string(path) + ':' + std::to_string(p.ln) + " - unrecognized command: " + p.str;
+		if (!(p.*it->second)()) return std::move(p.err);
 	}
 
-	// when we're all done with that, assert some extra usage requirements
-	for (const auto &sched : schedules)
+	// ensure usage constraints for rooms
+	if (p.c.rooms.empty()) return std::string(path) + " - no rooms were defined";
+
+	// ensure usage constraints for schedules
+	if (p.c.schedules.empty()) return std::string(path) + " - no schedules were defined";
+	for (const auto &sched : p.c.schedules)
 	{
 		assert(!sched.slots.empty()); // this should be impossible
-		
+
 		// make sure no timeslots overlap
 		for (std::size_t i = 1; i < sched.slots.size(); ++i)
 		{
@@ -213,165 +395,20 @@ std::variant<std::list<schedule>, std::string> read_schedules(const char *path)
 		}
 	}
 
-	return std::move(schedules);
-}
-std::variant<std::unordered_map<std::string, course_info>, std::string> read_courses(const std::list<schedule> &schedules, const char *path)
-{
-	std::ifstream f{ path };
-	if (!f) return std::string("failed to open ") + path + " for reading";
-
-	std::unordered_map<std::string, course_info> courses;
-	std::set<std::string> constraint_set;
-	std::string str;
-	int line_number = 1;
-	auto line_term = make_line_term(f, line_number);
-
-	// parse all the course data
-	while (true)
-	{
-		if (line_term()) continue; // if this is line term, line was empty (skip)
-		if (!f) { assert(f.eof()); break; } // this happens at eof
-		const int ln = line_number;
-
-		f >> str;
-		assert(f); // guaranteed to succeed from above
-		if (str == "course")
-		{
-			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected course id";
-			f >> str;
-			assert(f); // guaranteed to succeed from above
-
-			// insert a new course into the set (make sure it doesn't already exist)
-			if (courses.find(str) != courses.end()) return std::string(path) + ':' + std::to_string(ln) + " - attempt to respecify existing course: " + str;
-			course_info &info = courses[std::move(str)];
-
-			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected course capacity";
-			if (!(f >> info.capacity)) return std::string(path) + ':' + std::to_string(ln) + " - failed to parse course capacity";
-
-			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected instructor id";
-			f >> info.instructor;
-			assert(f); // guaranteed to succeed from above
-
-			if (!line_term() && f) // if we have extra stuff it's notes for the course
-			{
-				std::getline(f, info.notes);
-				assert(f); // guaranteed to succeed from above
-				++line_number; // bump this up to account for getline() consuming the newline char
-				if (auto p = info.notes.find('#'); p != std::string::npos) info.notes.erase(p); // remove comment from end of string (if present)
-				info.notes.erase(info.notes.find_last_not_of(" \t\n\r\v\f") + 1); // trim white space from end of string
-			}
-		}
-		else if (str == "require")
-		{
-			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected course id";
-			f >> str;
-			assert(f); // guaranteed to succeed from above
-
-			// find the course being constrained
-			auto it = courses.find(str);
-			if (it == courses.end()) return std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str;
-
-			// gather all the tokens
-			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected one or more room attributes";
-			do
-			{
-				f >> str;
-				assert(f); // guaranteed to succeed from above
-				it->second.required_attrs.insert(std::move(str)); // add requirement (duplicates are no-op)
-			} while (!line_term() && f);
-		}
-		else if (str == "parallel" || str == "orthogonal")
-		{
-			// parse the course list
-			constraint_set.clear();
-			while (!line_term() && f)
-			{
-				std::string s;
-				f >> s;
-				assert(f); // guaranteed to succeed from above
-				if (courses.find(s) == courses.end()) return std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + s;
-				constraint_set.insert(std::move(s));
-			}
-			if (constraint_set.size() < 2) return std::string(path) + ':' + std::to_string(ln) + " - expected two or more course ids";
-
-			// we handle parallel and orthogonal with same code - use this to separate the semantics
-			const auto bucket = str == "parallel" ? &course_info::parallel_courses : &course_info::orthogonal_courses;
-
-			// apply constraints
-			for (auto &dest_id : constraint_set)
-			{
-				auto &dest = courses.at(dest_id).*bucket; // get the destination set
-				for (auto &constraint : constraint_set) if (&dest_id != &constraint)
-				{
-					dest.insert(constraint); // add all other constraints to dest
-				}
-			}
-		}
-		else if (str == "follows")
-		{
-			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected course id";
-			f >> str;
-			assert(f); // guaranteed to succeed from above
-
-			// find the course being constrained (first)
-			auto first = courses.find(str);
-			if (first == courses.end()) return std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str;
-
-			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected a second course id";
-			f >> str;
-			assert(f); // guaranteed to succeed from above
-
-			// find the course being constrained (second)
-			auto second = courses.find(str);
-			if (second == courses.end()) return std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str;
-
-			if (!line_term() && f) return std::string(path) + ':' + std::to_string(ln) + " - expected only two arguments";
-
-			// apply the constraint
-			first->second.follow_courses.insert(second->first);
-		}
-		else if (str == "schedule")
-		{
-			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected course id";
-			f >> str;
-			assert(f); // guaranteed to succeed from above
-
-			// find the course being constrained
-			auto it = courses.find(str);
-			if (it == courses.end()) return std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str;
-
-			// get the schedule id
-			if (line_term() || !f) return std::string(path) + ':' + std::to_string(ln) + " - expected a schedule id";
-			f >> str;
-			assert(f); // guaranteed to succeed from above
-
-			// if there's already a schedule constraint for this course and they differ, it's a problem
-			std::string &sch = it->second.schedule;
-			if (!sch.empty() && sch != str) return std::string(path) + ':' + std::to_string(ln) + " - attempt to override pre-existing schedule constraint: " + sch + " -> " + str;
-
-			// if this is an unknown course, it's a problem
-			if (std::find_if(schedules.begin(), schedules.end(), [&](const auto &x) { return x.id == str; }) == schedules.end()) return std::string(path) + ':' + std::to_string(ln) + " - reference to undefined schedule: " + str;
-			sch = str; // apply the constraint
-		}
-		else return std::string(path) + ':' + std::to_string(ln) + " - unrecognized command: " + str;
-	}
-
-	return std::move(courses);
+	return std::move(p.c);
 }
 
 struct satisfy_info
 {
 public:
-	const std::vector<room> &rooms;
-	std::list<schedule> &schedules;
-	const std::unordered_map<std::string, course_info> &courses;
+	constraint_set &constraints;
 
 	std::list<std::list<std::set<std::string>>>                            follow_chains;            // list of all follow chains in the course topology
 	std::unordered_map<const std::list<std::set<std::string>>*, schedule*> follow_chain_to_schedule; // maps each follow chain to its required schedule or nullptr if no specific schedule is required
 
 	// constructs a new satisfiability info object
 	// if this throws it means that the system is impossibly-constrained (as opposed to just being unsatisfiable)
-	satisfy_info(const std::vector<room> &r, std::list<schedule> &s, const std::unordered_map<std::string, course_info> &c) : rooms(r), schedules(s), courses(c)
+	satisfy_info(constraint_set &_c) : constraints(_c)
 	{
 		std::list<std::set<std::string>>                                               psets;          // list of all parallel course sets
 		std::unordered_map<std::string, std::list<std::set<std::string>>::iterator>    course_to_pset; // maps each course to its pset
@@ -380,10 +417,10 @@ public:
 		bool                                                                           fmerge;         // flag for looping construction logic
 
 		// construct the trivial form of the parallel topology structure - just a bunch of bookmarked singletons
-		for (const auto &entry : c)
+		for (const auto &entry : constraints.courses)
 		{
 			psets.emplace_back().insert(entry.first);
-			course_to_pset[entry.first] = std::prev(psets.end());
+			course_to_pset.emplace(entry.first, std::prev(psets.end()));
 		}
 
 		// now apply all parallel constraints
@@ -395,14 +432,14 @@ public:
 			for (const auto &p : *pos)
 			{
 				// for each parallel constraint
-				for (const auto &pp : c.at(p).parallel_courses)
+				for (const auto &pp : constraints.courses.at(p).parallel_courses)
 				{
 					// get its parallel set - if it's us skip it
 					auto it = course_to_pset.at(pp);
 					if (it == pos) continue;
 
 					// merge it into our parallel set and account for all mapping updates
-					for (const auto &ppp : *it) course_to_pset[ppp] = pos;
+					for (const auto &ppp : *it) course_to_pset.at(ppp) = pos;
 					pos->merge(*it);
 					psets.erase(it);
 					merged = true;
@@ -427,10 +464,10 @@ public:
 					bool inserted = false;
 					for (const auto &p : *other)
 					{
-						for (const auto &pp : c.at(p).follow_courses)
+						for (const auto &pp : constraints.courses.at(p).follow_courses)
 						{
 							// get the follow pset
-							auto val = course_to_pset[pp];
+							auto val = course_to_pset.at(pp);
 							// if it's us, add it to the fset
 							if (&*val == &pset)
 							{
@@ -450,7 +487,7 @@ public:
 				const auto dest = fset[0];
 				for (std::size_t i = 1; i < fset.size(); ++i)
 				{
-					for (const auto &g : *fset[i]) course_to_pset[g] = dest;
+					for (const auto &g : *fset[i]) course_to_pset.at(g) = dest;
 					dest->merge(*fset[i]);
 					psets.erase(fset[i]);
 				}
@@ -474,7 +511,7 @@ public:
 				fset.clear();
 				for (const auto &i : pset)
 				{
-					for (const auto &j : c.at(i).follow_courses)
+					for (const auto &j : constraints.courses.at(i).follow_courses)
 					{
 						auto val = course_to_pset.at(j);
 						if (std::find(fset.begin(), fset.end(), val) == fset.end()) fset.push_back(val); // add to fset but don't take duplicates
@@ -489,7 +526,7 @@ public:
 				const auto dest = fset[0];
 				for (std::size_t i = 1; i < fset.size(); ++i)
 				{
-					for (const auto &g : *fset[i]) course_to_pset[g] = dest;
+					for (const auto &g : *fset[i]) course_to_pset.at(g) = dest;
 					dest->merge(*fset[i]);
 					psets.erase(fset[i]);
 				}
@@ -557,28 +594,28 @@ public:
 				for (const auto &p : pset)
 				{
 					// get this course - if it doesn't require a specific schedule skip it
-					const course_info &course = c.at(p);
+					const course_info &course = constraints.courses.at(p);
 					if (course.schedule.empty()) continue;
 
 					// get the required schedule for this course
-					auto sched = std::find_if(schedules.begin(), schedules.end(), [&](const auto &x) { return x.id == course.schedule; });
-					assert(sched != schedules.end()); // this should have been guaranteed prior to invoking the constructor
+					auto sched = constraints.schedules_map.find(course.schedule);
+					assert(sched != constraints.schedules_map.end()); // this should have been guaranteed prior to invoking the constructor
 
 					// if there's a required schedule for this chain we need to match it
 					if (required_schedule)
 					{
-						if (required_schedule != &*sched) throw std::logic_error(std::string("conflicting schedule specifiers in same follow chain: ") + *source + " -> " + required_schedule->id + " vs " + p + " -> " + course.schedule);
+						if (required_schedule != sched->second) throw std::logic_error(std::string("conflicting schedule specifiers in same follow chain: ") + *source + " -> " + required_schedule->id + " vs " + p + " -> " + course.schedule);
 					}
 					// otherwise just mark this as the new required schedule for the chain
 					else
 					{
-						required_schedule = &*sched;
+						required_schedule = sched->second;
 						source = &p;
 					}
 				}
 			}
 
-			follow_chain_to_schedule[&chain] = required_schedule; // add this chain to the map
+			follow_chain_to_schedule.emplace(&chain, required_schedule); // add this chain to the map
 		}
 	}
 
@@ -619,20 +656,23 @@ bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<std::set<std::st
 		return satisfy_pset_at(chain, sched, slot_i + 1, std::next(pset));
 	}
 
-	const auto &course = courses.at(*ppos);
+	const auto &course = constraints.courses.at(*ppos);
 	timeslot   &slot = sched.slots[slot_i];
 
 	// attempt to put it into each available room
-	for (std::size_t k = 0; k < slot.assignments.size(); ++k)
+	auto r = constraints.rooms.begin();
+	for (std::size_t k = 0; k < slot.assignments.size(); ++k, ++r)
 	{
+		assert(r != constraints.rooms.end()); // this should never happen
+
 		// if this room is already taken, it's not viable
 		if (!slot.assignments[k].empty()) continue;
 		// if this room doesn't have a high enough capacity, it's not viable
-		if (rooms[k].capacity < course.capacity) continue;
+		if (r->capacity < course.capacity) continue;
 
 		// if this room lacks any required attributes, it's not viable
 		if ([&] {
-			const auto &attrs = rooms[k].attr;
+			const auto &attrs = r->attr;
 				for (const auto &req : course.required_attrs)
 				{
 					if (attrs.find(req) == attrs.end()) return true;
@@ -698,7 +738,7 @@ bool satisfy_info::satisfy_fchain(std::list<std::list<std::set<std::string>>>::c
 	// otherwise attempt to put current follow chain into each schedule in order
 	else
 	{
-		for (auto &sched : schedules)
+		for (auto &sched : constraints.schedules)
 		{
 			if (scheduler(sched)) return true;
 		}
@@ -710,12 +750,12 @@ bool satisfy_info::satisfy_fchain(std::list<std::list<std::set<std::string>>>::c
 bool satisfy_info::satisfy()
 {
 	// initialize all schedule assignments to empty
-	for (auto &sched : schedules)
+	for (auto &sched : constraints.schedules)
 	{
 		for (auto &slot : sched.slots)
 		{
 			slot.assignments.clear();
-			slot.assignments.resize(rooms.size());
+			slot.assignments.resize(constraints.rooms.size());
 		}
 	}
 
@@ -723,14 +763,14 @@ bool satisfy_info::satisfy()
 	return satisfy_fchain(follow_chains.begin());
 }
 
-void print_schedule_latex(std::ostream &ostr, const std::vector<room> &rooms, const schedule &sched, const std::unordered_map<std::string, course_info> &courses)
+void print_schedule_latex(std::ostream &ostr, const constraint_set &c, const schedule &sched)
 {
 	ostr << "\\begin{table}[ht!]\n\\centering\n\\begin{tabularx}{\\textwidth}{|X";
-	for (std::size_t i = 0; i < rooms.size(); ++i) ostr << "|X";
+	for (std::size_t i = 0; i < c.rooms.size(); ++i) ostr << "|X";
 	ostr << "|}\n\\hline ";
 
 	ostr << fix_id(sched.id);
-	for (const auto &room : rooms) ostr << " & " << fix_id(room.id);
+	for (const auto &room : c.rooms) ostr << " & " << fix_id(room.id);
 	ostr << " \\\\\n\\hline ";
 
 	for (const auto &timeslot : sched.slots)
@@ -741,9 +781,9 @@ void print_schedule_latex(std::ostream &ostr, const std::vector<room> &rooms, co
 			ostr << " & ";
 			if (!asgn.empty())
 			{
-				const auto &c = courses.at(asgn);
-				ostr << fix_id(asgn) << ' ' << fix_id(c.instructor);
-				if (!c.notes.empty()) ostr << ' ' << c.notes;
+				const auto &course = c.courses.at(asgn);
+				ostr << fix_id(asgn) << ' ' << fix_id(course.instructor);
+				if (!course.notes.empty()) ostr << ' ' << course.notes;
 			}
 		}
 		ostr << " \\\\\n\\hline ";
@@ -751,23 +791,23 @@ void print_schedule_latex(std::ostream &ostr, const std::vector<room> &rooms, co
 
 	ostr << "\n\\end{tabularx}\n\\end{table}\n";
 }
-void print_schedules_latex(std::ostream &ostr, const std::vector<room> &rooms, const std::list<schedule> &schedules, const std::unordered_map<std::string, course_info> &courses)
+void print_schedules_latex(std::ostream &ostr, const constraint_set &c)
 {
 	ostr << "\\documentclass[8pt]{article}\n\\usepackage[margin=0.5in]{geometry}\n\\usepackage{tabularx}\n\\begin{document}\n\n";
 
-	for (const auto &sched : schedules)
+	for (const auto &sched : c.schedules)
 	{
-		print_schedule_latex(ostr, rooms, sched, courses);
+		print_schedule_latex(ostr, c, sched);
 		ostr << '\n';
 	}
 
 	ostr << "\\end{document}\n";
 }
 
-void print_schedule_text(std::ostream &ostr, const std::vector<room> &rooms, const schedule &sched, const std::unordered_map<std::string, course_info> &courses)
+void print_schedule_text(std::ostream &ostr, const constraint_set &c, const schedule &sched)
 {
 	ostr << fix_id(sched.id);
-	for (const auto &room : rooms) ostr << '\t' << fix_id(room.id);
+	for (const auto &room : c.rooms) ostr << '\t' << fix_id(room.id);
 	ostr << '\n';
 
 	for (const auto &timeslot : sched.slots)
@@ -778,32 +818,33 @@ void print_schedule_text(std::ostream &ostr, const std::vector<room> &rooms, con
 			ostr << '\t';
 			if (!asgn.empty())
 			{
-				const auto &c = courses.at(asgn);
-				ostr << fix_id(asgn) << ' ' << fix_id(c.instructor);
-				if (!c.notes.empty()) ostr << ' ' << c.notes;
+				const auto &course = c.courses.at(asgn);
+				ostr << fix_id(asgn) << ' ' << fix_id(course.instructor);
+				if (!course.notes.empty()) ostr << ' ' << course.notes;
 			}
 		}
 		ostr << '\n';
 	}
 }
-void print_schedules_text(std::ostream &ostr, const std::vector<room> &rooms, const std::list<schedule> &schedules, const std::unordered_map<std::string, course_info> &courses)
+void print_schedules_text(std::ostream &ostr, const constraint_set &c)
 {
-	for (const auto &sched : schedules)
+	for (const auto &sched : c.schedules)
 	{
-		print_schedule_text(ostr, rooms, sched, courses);
+		print_schedule_text(ostr, c, sched);
 		ostr << '\n';
 	}
 }
 
-const char *const help_msg = R"(Usage: schedule [OPTION]... [rooms file] [schedule file] [courses file]
+const char *const help_msg = R"(Usage: schedule [OPTION]... [constraints file]
 Generate class schedule given rooms, timeslots, and course info.
+If constraints file is not specified reads from stdin.
 
   --help               print this help page and exit
   --latex              generate latex source instead of tab-separated text
   --topology           print the course topology to stderr in addition to all other work
 )";
 
-int main(int argc, const char *const argv[])
+int main(int argc, const char *const argv[]) try
 {
 	std::vector<const char*> pathspec;
 	bool latex = false;
@@ -821,7 +862,7 @@ int main(int argc, const char *const argv[])
 		else pathspec.push_back(argv[i]);
 	}
 
-	if (pathspec.size() != 3)
+	if (pathspec.size() > 1)
 	{
 		std::cerr << "incorrect usage: see --help for info\n";
 		return 1;
@@ -830,35 +871,35 @@ int main(int argc, const char *const argv[])
 
 	// ---------------------------------------------
 
-	auto _rooms = read_rooms(pathspec[0]);
-	if (_rooms.index() != 0)
+	// parse the input file (or stdin if none was specified)
+	std::variant<constraint_set, std::string> _constraints;
+	if (!pathspec.empty())
 	{
-		std::cerr << std::get<1>(_rooms) << '\n';
+		std::ifstream f{ pathspec[0] };
+		if (!f)
+		{
+			std::cerr << "failed to open " << pathspec[0] << " for reading\n";
+			return 60;
+		}
+		_constraints = read_constraints(f, pathspec[0]);
+	}
+	else _constraints = read_constraints(std::cin, "<stdin>");
+
+	// ---------------------------------------------
+
+	// check the error variant for parse result
+	if (_constraints.index() != 0)
+	{
+		std::cerr << std::get<1>(_constraints) << '\n';
 		return 100;
 	}
-	auto &rooms = std::get<0>(_rooms);
-
-	auto _schedules = read_schedules(pathspec[1]);
-	if (_schedules.index() != 0)
-	{
-		std::cerr << std::get<1>(_schedules) << '\n';
-		return 101;
-	}
-	auto &schedules = std::get<0>(_schedules);
-
-	auto _courses = read_courses(schedules, pathspec[2]);
-	if (_courses.index() != 0)
-	{
-		std::cerr << std::get<1>(_courses) << '\n';
-		return 102;
-	}
-	auto &courses = std::get<0>(_courses);
+	auto &constraints = std::get<0>(_constraints);
 
 	// ---------------------------------------------
 
 	// attempt to create the solver object - if this fails it means that there were impossible constraints
 	std::unique_ptr<satisfy_info> solver;
-	try { solver = std::make_unique<satisfy_info>(rooms, schedules, courses); }
+	try { solver = std::make_unique<satisfy_info>(constraints); }
 	catch (const std::exception & e)
 	{
 		std::cerr << "impossible constraints encountered: " << e.what() << '\n';
@@ -879,7 +920,17 @@ int main(int argc, const char *const argv[])
 
 	// print the resulting (satisfied) schedule
 	auto printer = latex ? print_schedules_latex : print_schedules_text;
-	printer(std::cout, rooms, schedules, courses);
+	printer(std::cout, constraints);
 
 	return 0;
+}
+catch (const std::exception & e)
+{
+	std::cerr << "ERROR: unhandled exception\n" << e.what() << '\n';
+	return 600;
+}
+catch (...)
+{
+	std::cerr << "ERROR: unhandled exception of unknown type\n";
+	return 601;
 }

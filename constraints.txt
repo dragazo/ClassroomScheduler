@@ -1,20 +1,34 @@
-# this is the course spec file (comments as usual, blank lines ignored)
-# this file is structured similar to assembly language:
+# comments are started with the '#' character.
+# empty lines will be ignored.
 
-# like all other config files, identifiers are any non-white string of characters.
-# on display, underscores will be replaced with spaces and anything at or after an asterisk '*' is omitted.
+# identifiers are any string of non-whitespace characters.
+# upon display, underscores '_' will be replaced with spaces and anything after an asterisk '*' is omitted.
 # e.g. the id "CSCI_1170-01L*1" will be displayed as "CSCI 1170-01L".
-# however, you must use the full (technical) name in these config files.
+# however, you must use the full (technical) id to refer to the item.
+
+# this specification file is formatted similar to assembly language.
+# instructions are not case sensitive (but everything else is).
+
+# 'room' introduces a new named room.
+# usage: room [id] [capacity] [attributes]...
+# id is the name of the new room.
+# capacity is the maximum number of students allowed to be in the room at one time.
+# attributes is a whitespace-separated sequence of custom attributes (can used for constraints).
+
+# 'timeslot' introduces a new schedule timeslot.
+# usage: timeslot [id] [start]-[stop]
+# id is the name of the schedule to insert a timeslot into - if it does not already exist it is created.
+# start and stop denote the timeslot bounds and take the form hh:mm in 24hr (military) time.
 
 # 'course' introduces a new named course.
 # usage: course [id] [capacity] [notes...]
-# id must not contain white space - underscores can be used and will be replaced with spaces on display
+# id is the name of the new course
 # capacity is the max number of students in said course (per section)
 # different sections are handled by technically being different courses: see below
-# if multiple rooms are required for a course (e.g. a lab) then it needs multiple courses: see below
+# if multiple rooms are requiresd for a course (e.g. a lab) then it needs multiple courses: see below
 
-# 'require' adds a required room attribute to a pre-existing course
-# usage: require [id] [attr]...
+# 'requires' adds a requiresd room attribute to a pre-existing course
+# usage: requires [id] [attr]...
 # attributes are defined by the (separate) rooms file.
 
 # 'parallel' specifies that a set of courses MUST take place at same time (e.g. class that needs two rooms).
@@ -26,6 +40,37 @@
 # this means that these courses MUST NOT happen at same time as any other in the list.
 # this is the effective opposite of 'parallel'.
 # note: this constraint is NOT transitive.
+
+# -----------------------------------------------------------
+
+room 307           30
+room 321           30
+room 323           30
+room 350           50 lab # e.g. we can give 350 the "lab" attribute to mark that it has computers
+room 360           50 lab
+room 320/452_other 90
+
+# -----------------------------------------------------------
+
+timeslot TR 8:00-9:25
+timeslot TR 9:40-11:05
+timeslot TR 11:20-12:45
+timeslot TR 13:00-14:25
+timeslot TR 14:40-16:05
+timeslot TR 16:20-17:45
+timeslot TR 18:00-19:25
+timeslot TR 19:40-21:05
+
+timeslot MWF 8:00-8:55
+timeslot MWF 9:10-10:05
+timeslot MWF 10:20-11:15
+timeslot MWF 11:30-12:25
+timeslot MWF 12:40-14:05
+timeslot MWF 14:20-15:45
+timeslot MWF 16:20-17:45
+timeslot MWF 18:00-19:25
+
+# -----------------------------------------------------------
 
 course 1010-01       80 Sarkar M only
 
@@ -43,12 +88,12 @@ course 1150-05L      30 Williams
 course 1150-06       30 Smith
 course 1150-06L      30 Smith
 
-require 1150-01L   lab
-require 1150-03L*1 lab
-require 1150-03L*2 lab
-require 1150-04L   lab
-require 1150-05L   lab
-require 1150-06L   lab
+requires 1150-01L   lab
+requires 1150-03L*1 lab
+requires 1150-03L*2 lab
+requires 1150-04L   lab
+requires 1150-05L   lab
+requires 1150-06L   lab
 
 parallel 1150-01 1150-01L
 parallel 1150-03 1150-03L*1 1150-03L*2
@@ -74,13 +119,13 @@ course 1170-04L      30 Li Mechatronics
 course 1170-05       30 Al-Tobasei
 course 1170-05L      30 Al-Tobasei
 
-require 1170-01L*1 lab
-require 1170-01L*2 lab
-require 1170-02L*1 lab
-require 1170-02L*2 lab
-require 1170-03L   lab
-require 1170-04L   lab
-require 1170-05L   lab
+requires 1170-01L*1 lab
+requires 1170-01L*2 lab
+requires 1170-02L*1 lab
+requires 1170-02L*2 lab
+requires 1170-03L   lab
+requires 1170-04L   lab
+requires 1170-05L   lab
 
 orthogonal 1170-01 1170-02 1170-03 1170-04 1170-05
 
@@ -107,12 +152,12 @@ course 2170-04L      30 Li
 course 2170-05       30 Untch
 course 2170-05L      30 Untch
 
-require 2170-01L*1 lab
-require 2170-01L*2 lab
-require 2170-02L   lab
-require 2170-03L   lab
-require 2170-04L   lab
-require 2170-05L   lab
+requires 2170-01L*1 lab
+requires 2170-01L*2 lab
+requires 2170-02L   lab
+requires 2170-03L   lab
+requires 2170-04L   lab
+requires 2170-05L   lab
 
 orthogonal 2170-01 2170-02 2170-03 2170-04 2170-05
 
@@ -137,10 +182,10 @@ course 3130-01L*2    30 Phillips T only
 course 3130-01L*3    30 Phillips T only
 course 3130-01L*4    30 Phillips T only
 
-require 3130-01L*1 lab
-require 3130-01L*2 lab
-require 3130-01L*3 lab
-require 3130-01L*4 lab
+requires 3130-01L*1 lab
+requires 3130-01L*2 lab
+requires 3130-01L*3 lab
+requires 3130-01L*4 lab
 
 parallel 3130-01L*1 3130-01L*2
 parallel 3130-01L*3 3130-01L*4
@@ -152,7 +197,7 @@ schedule 3130-01 TR
 course 3160-01       30 Seo
 course 3160-01L      30 Seo
 
-require 3160-01L lab
+requires 3160-01L lab
 
 parallel 3160-01 3160-01L
 
@@ -163,7 +208,7 @@ schedule 3210-01 MWF
 course 3240/6050-01  50 Butler
 course 3240/6050-01L 50 Butler
 
-require 3240/6050-01L lab
+requires 3240/6050-01L lab
 
 follows 3240/6050-01 3240/6050-01L
 
@@ -179,7 +224,7 @@ schedule 4/5160-01 MWF
 course 3180-01       30 Seo
 course 3180-01L      30 Seo
 
-require 3180-01L lab
+requires 3180-01L lab
 
 parallel 3180-01 3180-01L
 
