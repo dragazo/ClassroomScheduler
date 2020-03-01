@@ -20,12 +20,24 @@
 # id is the name of the schedule to insert a timeslot into - if it does not already exist it is created.
 # start and stop denote the timeslot bounds and take the form hh:mm in 24hr (military) time.
 
+# 'instructor' introduces a new instructor.
+# usage: instructor [id]
+# id is the name of the instructor.
+
 # 'course' introduces a new named course.
-# usage: course [id] [capacity] [notes...]
+# usage: course [id] [capacity] [instructor] [notes...]
 # id is the name of the new course
 # capacity is the max number of students in said course (per section)
+# instructor is the id of the instructor for this course
 # different sections are handled by technically being different courses: see below
 # if multiple rooms are requiresd for a course (e.g. a lab) then it needs multiple courses: see below
+
+# 'unavailable' introduces a new unavailable constraint for an instructor.
+# this is likely an uncommon constraint but could be used to represent e.g. a long commute that prohibits early classes.
+# usage: unavailable [id] [start]-[stop]
+# id is the instructor being constrained
+# start and stop denote the unavailable time (no classes will be scheduled for this instructor during this time)
+# multiple unavailable constraints for the same instructor will be merged together.
 
 # 'requires' adds a requiresd room attribute to a pre-existing course
 # usage: requires [id] [attr]...
@@ -69,6 +81,27 @@ timeslot MWF 12:40-14:05
 timeslot MWF 14:20-15:45
 timeslot MWF 16:20-17:45
 timeslot MWF 18:00-19:25
+
+# -----------------------------------------------------------
+
+instructor Sarkar
+instructor Williams
+instructor Gu
+instructor Smith
+instructor Untch
+instructor Li
+instructor Al-Tobasei
+instructor Aderholdt
+instructor Pettey
+instructor Barbosa
+instructor Phillips
+instructor Seo
+instructor Dong
+instructor Butler
+instructor Johnson
+
+# EXAMPLE: this isn't a real-world constraint - it's just meant to give an example of this constraint
+unavailable Phillips 0:00-12:00
 
 # -----------------------------------------------------------
 
@@ -190,6 +223,7 @@ requires 3130-01L*4 lab
 parallel 3130-01L*1 3130-01L*2
 parallel 3130-01L*3 3130-01L*4
 
+follows 3130-01 3130-01L*1
 follows 3130-01L*1 3130-01L*3
 
 schedule 3130-01 TR

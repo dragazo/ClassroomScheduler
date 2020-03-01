@@ -20,7 +20,9 @@
 
 void print_time(std::ostream &ostr, int time)
 {
-	ostr << (time / 60) << ':' << std::setfill('0') << std::setw(2) << (time % 60);
+	auto oldfill = ostr.fill('0');
+	ostr << (time / 60) << ':' << std::setw(2) << (time % 60);
+	ostr.fill(oldfill);
 }
 
 template<typename ...Args>
@@ -61,6 +63,62 @@ struct timespan
 		return ostr;
 	}
 };
+struct time_union
+{
+	std::vector<timespan> content;
+
+	template<bool closed>
+	auto intersect_range(timespan span)
+	{
+		if constexpr (closed)
+		{
+			// equal_range() gives closed intervals with less than predicates by definition
+			auto pos = std::lower_bound(content.begin(), content.end(), span.start, [](const timespan &a, int b) { return a.stop < b; });
+			auto other = std::upper_bound(content.begin(), content.end(), span.stop, [](int a, const timespan &b) { return a < b.start; });
+			return std::make_pair(pos, other);
+		}
+		else
+		{
+			// but by giving a less than or equal predicate we get an open interval by omitting the equal items
+			auto pos = std::lower_bound(content.begin(), content.end(), span.start, [](const timespan &a, int b) { return a.stop <= b; });
+			auto other = std::upper_bound(content.begin(), content.end(), span.stop, [](int a, const timespan &b) { return a <= b.start; });
+			return std::make_pair(pos, other);
+		}
+	}
+
+	void add(timespan span)
+	{
+		static_assert(std::is_same_v<std::iterator_traits<decltype(content)::iterator>::iterator_category, std::random_access_iterator_tag>);
+		assert(span.start >= 0 && span.start <= span.stop);
+
+		// construct [pos, other) - the range that this span intersects (as closed intervals)
+		auto range = intersect_range<true>(span);
+
+		// if there was no intersection, just insert into the list at appropriate location
+		if (range.first == range.second) content.insert(range.first, span);
+		// otherwise there was an intersection and we need to do merging logic
+		else
+		{
+			// merge the times into the first intersection item
+			range.first->start = std::min(range.first->start, span.start);
+			range.first->stop = std::max(std::prev(range.second)->stop, span.stop);
+			// and erase all the others (now covered by first)
+			content.erase(std::next(range.first), range.second);
+		}
+	}
+	void add(const time_union u)
+	{
+		for (const auto &i : u.content) add(i);
+	}
+
+	bool intersects(timespan span)
+	{
+		auto range = intersect_range<false>(span); // just checking for intersection uses open interval logic
+		return range.first != range.second;
+	}
+
+	bool empty() const noexcept { return content.empty(); }
+};
 struct timeslot
 {
 	timespan                 time;        // the timespan denoting this timeslot
@@ -71,11 +129,16 @@ struct schedule
 	std::string id;              // id for this schedule (name)
 	std::vector<timeslot> slots; // the time slots associated with this schedule
 };
+struct instructor
+{
+	std::string id;             // id (name) of this instructor
+	time_union  unavailability; // all times when this instructor is unavailable for some reason (e.g. early morning due to long commute or other responsibilities)
+};
 struct course_info
 {
-	int         capacity = 0; // maximum number of students taking the course (one section)
-	std::string instructor;   // the instructor for this course
-	std::string notes;        // notes for the course (displayed in output)
+	int         capacity = 0;         // maximum number of students taking the course (one section)
+	instructor *instructor = nullptr; // the instructor for this course
+	std::string notes;                // notes for the course (displayed in output)
 
 	std::set<std::string> required_attrs;     // list of all required room attributes for this course
 	std::set<std::string> parallel_courses;   // list of all parallel courses (id)
@@ -88,13 +151,17 @@ struct constraint_set
 {
 	// rooms and scheudles are backed by lists rather than just thrown into unordered_map directly because iteration order matters.
 	// for rooms, we need to output the schedule table in a predictable order - for schedules we need to attempt to schedule courses in a predictable way.
+	// instructors is backed by a list because courses hold a pointer to their instructor directly to avoid lookup
 
-	std::list<room>     rooms;     // a list of all the rooms
-	std::list<schedule> schedules; // a list of all the schedules
+	std::list<room>       rooms;       // a list of all the rooms
+	std::list<schedule>   schedules;   // a list of all the schedules
+	std::list<instructor> instructors; // a list of all instructors
 
-	std::unordered_map<std::string, room*>       rooms_map;     // maps from room id to the room
-	std::unordered_map<std::string, schedule*>   schedules_map; // maps from schedule id to the schedule
-	std::unordered_map<std::string, course_info> courses;       // a list of all courses - maps id to course info
+	std::unordered_map<std::string, room*>       rooms_map;       // maps from room id to the room
+	std::unordered_map<std::string, schedule*>   schedules_map;   // maps from schedule id to the schedule
+	std::unordered_map<std::string, instructor*> instructors_map; // a list of all instructors - maps id to instructor info
+
+	std::unordered_map<std::string, course_info> courses; // a list of all courses - maps id to course info
 };
 
 // skips white space but stops on new line characters (extracts it).
@@ -217,6 +284,24 @@ struct constraint_parser_pack
 
 		return true;
 	}
+	bool _parse_instructor()
+	{
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected instructor id"; return false; }
+		f >> str;
+		assert(f); // guaranteed to succeed from above
+
+		// if this instructor already exists
+		if (c.instructors_map.find(str) != c.instructors_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - an instructor with this id was already defined"; return false; }
+		
+		// create the instructor
+		instructor &inst = c.instructors.emplace_back();
+		inst.id = str;
+		c.instructors_map.emplace(std::move(str), &inst);
+
+		if (!line_term() && f) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected tokens encountered after instructor id"; return false; }
+
+		return true;
+	}
 	bool _parse_course()
 	{
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected course id"; return false; }
@@ -230,9 +315,13 @@ struct constraint_parser_pack
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected course capacity"; return false; }
 		if (!(f >> info.capacity)) { err = std::string(path) + ':' + std::to_string(ln) + " - failed to parse course capacity"; return false; }
 
+		// get the instructor for this course
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected instructor id"; return false; }
-		f >> info.instructor;
+		f >> str;
 		assert(f); // guaranteed to succeed from above
+		auto inst = c.instructors_map.find(str);
+		if (inst == c.instructors_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - reference to undefined instructor: " + str; return false; }
+		info.instructor = inst->second; // fill in instructor field
 
 		if (!line_term() && f) // if we have extra stuff it's notes for the course
 		{
@@ -343,6 +432,29 @@ struct constraint_parser_pack
 		if (c.schedules_map.find(str) == c.schedules_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - reference to undefined schedule: " + str; return false; }
 		sch = str; // apply the constraint
 
+		if (!line_term() && f) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected tokens encountered after schedule id"; return false; }
+
+		return true;
+	}
+	bool _parse_unavailable()
+	{
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected instructor id"; return false; }
+		f >> str;
+		assert(f); // guaranteed to succeed from above
+
+		// get the instructor being modified - if not defined error
+		auto inst = c.instructors_map.find(str);
+		if (inst == c.instructors_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - undefined reference to instructor: " + str; return false; }
+
+		// parse the time
+		timespan span;
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected timespan after instructor id"; return false; }
+		if (!parse_time_range(f, span)) { err = std::string(path) + ':' + std::to_string(ln) + " - failed to parse timespan"; return false; }
+		if (!line_term() && f) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected tokens encountered after timespan"; return false; }
+
+		// add it to unavailability
+		inst->second->unavailability.add(span);
+
 		return true;
 	}
 };
@@ -350,12 +462,14 @@ std::unordered_map<std::string, bool(constraint_parser_pack::*)()> parse_handler
 {
 	{ "room", &constraint_parser_pack::_parse_room },
 { "timeslot", &constraint_parser_pack::_parse_timeslot },
+{ "instructor", &constraint_parser_pack::_parse_instructor },
 { "course", &constraint_parser_pack::_parse_course },
 { "requires", &constraint_parser_pack::_parse_requires },
 { "parallel", &constraint_parser_pack::_parse_parallel_orthogonal },
 { "orthogonal", &constraint_parser_pack::_parse_parallel_orthogonal },
 { "follows", &constraint_parser_pack::_parse_follows },
 { "schedule", &constraint_parser_pack::_parse_schedule },
+{ "unavailable", &constraint_parser_pack::_parse_unavailable },
 };
 std::variant<constraint_set, std::string> read_constraints(std::istream &f, const char *path)
 {
@@ -406,15 +520,19 @@ public:
 	std::list<std::list<std::set<std::string>>>                            follow_chains;            // list of all follow chains in the course topology
 	std::unordered_map<const std::list<std::set<std::string>>*, schedule*> follow_chain_to_schedule; // maps each follow chain to its required schedule or nullptr if no specific schedule is required
 
+	// maps schedules to a map from follow chain to valid start index - used to severely prune state space for some types of constraints
+	std::unordered_map<const schedule*, std::unordered_map<const std::list<std::set<std::string>>*, std::vector<std::size_t>>> schedule_to_follow_chain_to_start_index;
+
 	// constructs a new satisfiability info object
 	// if this throws it means that the system is impossibly-constrained (as opposed to just being unsatisfiable)
 	satisfy_info(constraint_set &_c) : constraints(_c)
 	{
-		std::list<std::set<std::string>>                                               psets;          // list of all parallel course sets
-		std::unordered_map<std::string, std::list<std::set<std::string>>::iterator>    course_to_pset; // maps each course to its pset
-		std::unordered_map<const std::set<std::string>*, const std::set<std::string>*> follow_psets;   // maps a pset to its follow pset (if any)
-		std::vector<std::list<std::set<std::string>>::iterator>                        fset;           // temporary for building follow sets
-		bool                                                                           fmerge;         // flag for looping construction logic
+		std::list<std::set<std::string>>                                               psets;                  // list of all parallel course sets
+		std::unordered_map<std::string, std::list<std::set<std::string>>::iterator>    course_to_pset;         // maps each course to its pset
+		std::unordered_map<const std::set<std::string>*, const std::set<std::string>*> follow_psets;           // maps a pset to its follow pset (if any)
+		std::vector<std::list<std::set<std::string>>::iterator>                        fset;                   // temporary for building follow sets
+		bool                                                                           fmerge;                 // flag for looping construction logic
+		std::unordered_map<const std::set<std::string>*, time_union>                   pset_to_unavailability; // maps each pset to its total unavailability union
 
 		// construct the trivial form of the parallel topology structure - just a bunch of bookmarked singletons
 		for (const auto &entry : constraints.courses)
@@ -617,6 +735,58 @@ public:
 
 			follow_chain_to_schedule.emplace(&chain, required_schedule); // add this chain to the map
 		}
+
+		// now we generate the total unavailability unions for each pset
+		for (const auto &chain : follow_chains)
+		{
+			for (const auto &pset : chain)
+			{
+				time_union u;
+				for (const auto &i : pset) u.add(constraints.courses.at(i).instructor->unavailability);
+				pset_to_unavailability.emplace(&pset, std::move(u));
+			}
+		}
+
+		// examine each schedule
+		for (const auto &sched : constraints.schedules)
+		{
+			std::unordered_map<const std::list<std::set<std::string>>*, std::vector<std::size_t>> follow_chain_to_start_index;
+
+			// and each follow chain
+			for (const auto &chain : follow_chains)
+			{
+				std::vector<std::size_t> good_starts;
+
+				// and each starting position
+				for (std::size_t start = 0; start < sched.slots.size() && start + chain.size() <= sched.slots.size(); ++start)
+				{
+					bool good = true;
+
+					// and each pset in the chain
+					auto pset = chain.begin();
+					for (std::size_t i = 0; i < chain.size(); ++i, ++pset)
+					{
+						// if this violates an availability, no good
+						if (pset_to_unavailability.at(&*pset).intersects(sched.slots[start + i].time))
+						{
+							good = false;
+							break;
+						}
+					}
+
+					// if this starting position was good, insert it as a valid starting 
+					if (good) good_starts.push_back(start);
+				}
+
+				// if there were no good starts this is impossible
+				if (good_starts.empty()) throw std::logic_error("no valid starting positions for one or more follow chains");
+				// otherwise insert into the follow chain map
+				follow_chain_to_start_index.emplace(&chain, std::move(good_starts));
+			}
+
+			// insert into the schedule map
+			schedule_to_follow_chain_to_start_index.emplace(&sched, std::move(follow_chain_to_start_index));
+		}
 	}
 
 	void print_topology(std::ostream &ostr)
@@ -627,8 +797,14 @@ public:
 			ostr << "[ " << chain.size() << " ]:\n";
 			for (const auto &s : chain)
 			{
-				ostr << "   ";
+				ostr << "    ";
 				for (const auto &ss : s) ostr << ' ' << std::setw(16) << ss;
+				/*if (const auto &unavail = pset_to_unavailability.at(&s); !unavail.empty())
+				{
+					ostr << "    (unavailable:";
+					for (const auto &i : unavail.content) ostr << ' ' << i;
+					ostr << ')';
+				}*/
 				ostr << '\n';
 			}
 		}
@@ -650,8 +826,6 @@ bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<std::set<std::st
 	// if we're at the end of the current pset, we're done with this pset
 	if (ppos == pset->end())
 	{
-		assert(slot_i + 1 < sched.slots.size()); // this should be guaranteed at the follow chain level
-
 		// recurse to the next item in the follow chain
 		return satisfy_pset_at(chain, sched, slot_i + 1, std::next(pset));
 	}
@@ -708,8 +882,11 @@ bool satisfy_info::satisfy_pset_at(std::list<std::list<std::set<std::string>>>::
 {
 	// if we're at the end of the follow chain, we're done with this chain - recurse to the next
 	if (pset == chain->end()) return satisfy_fchain(std::next(chain));
+
+	assert(slot_i < sched.slots.size()); // sanity check
+
 	// otherwise recurse into the pset
-	else return satisfy_pset_at_interior(chain, sched, slot_i, pset, pset->begin());
+	return satisfy_pset_at_interior(chain, sched, slot_i, pset, pset->begin());
 }
 bool satisfy_info::satisfy_fchain(std::list<std::list<std::set<std::string>>>::const_iterator chain)
 {
@@ -718,11 +895,12 @@ bool satisfy_info::satisfy_fchain(std::list<std::list<std::set<std::string>>>::c
 
 	// create a function to attempt to place the current course into the given schedule
 	auto scheduler = [&] (schedule &sched) {
-		// try to put it into each timeslot in the given schedule
-		for (std::size_t slot_i = 0; slot_i < sched.slots.size(); ++slot_i)
+		// try to put it into each valid starting timeslot in the given schedule
+		for (std::size_t slot_i : schedule_to_follow_chain_to_start_index.at(&sched).at(&*chain))
 		{
 			// if there's not enough room to fit the entire chain we can prune this entire execution branch
-			if (slot_i + chain->size() >= sched.slots.size()) break;
+			//if (slot_i + chain->size() > sched.slots.size()) break;
+			assert(slot_i + chain->size() <= sched.slots.size());
 
 			// if we can satisfy this pset with this slot
 			if (satisfy_pset_at(chain, sched, slot_i, chain->begin())) return true;
@@ -782,7 +960,7 @@ void print_schedule_latex(std::ostream &ostr, const constraint_set &c, const sch
 			if (!asgn.empty())
 			{
 				const auto &course = c.courses.at(asgn);
-				ostr << fix_id(asgn) << ' ' << fix_id(course.instructor);
+				ostr << fix_id(asgn) << ' ' << fix_id(course.instructor->id);
 				if (!course.notes.empty()) ostr << ' ' << course.notes;
 			}
 		}
@@ -819,7 +997,7 @@ void print_schedule_text(std::ostream &ostr, const constraint_set &c, const sche
 			if (!asgn.empty())
 			{
 				const auto &course = c.courses.at(asgn);
-				ostr << fix_id(asgn) << ' ' << fix_id(course.instructor);
+				ostr << fix_id(asgn) << ' ' << fix_id(course.instructor->id);
 				if (!course.notes.empty()) ostr << ' ' << course.notes;
 			}
 		}
@@ -867,7 +1045,6 @@ int main(int argc, const char *const argv[]) try
 		std::cerr << "incorrect usage: see --help for info\n";
 		return 1;
 	}
-	std::cout.fill('0');
 
 	// ---------------------------------------------
 
