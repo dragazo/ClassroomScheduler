@@ -1,22 +1,22 @@
 #include <iostream>
 #include <iomanip>
-#include <vector>
+#include <sstream>
+#include <utility>
+#include <string>
+#include <deque>
+#include <list>
 #include <set>
+#include <vector>
 #include <unordered_set>
 #include <unordered_map>
-#include <string>
-#include <utility>
 #include <fstream>
 #include <cctype>
 #include <limits>
 #include <variant>
-#include <cassert>
-#include <algorithm>
-#include <sstream>
-#include <optional>
-#include <list>
-#include <stdexcept>
 #include <memory>
+#include <algorithm>
+#include <stdexcept>
+#include <cassert>
 
 void print_time(std::ostream &ostr, int time)
 {
@@ -119,10 +119,12 @@ struct time_union
 
 	bool empty() const noexcept { return content.empty(); }
 };
+
+struct course;
 struct timeslot
 {
-	timespan                 time;        // the timespan denoting this timeslot
-	std::vector<std::string> assignments; // the room assignments (course id or empty string for no assignment)
+	timespan                   time;        // the timespan denoting this timeslot
+	std::vector<const course*> assignments; // the room assignments (course id or empty string for no assignment)
 };
 struct schedule
 {
@@ -134,34 +136,32 @@ struct instructor
 	std::string id;             // id (name) of this instructor
 	time_union  unavailability; // all times when this instructor is unavailable for some reason (e.g. early morning due to long commute or other responsibilities)
 };
-struct course_info
+struct course
 {
+	std::string id;                   // id (name) of this course
 	int         capacity = 0;         // maximum number of students taking the course (one section)
 	instructor *instructor = nullptr; // the instructor for this course
 	std::string notes;                // notes for the course (displayed in output)
 
-	std::set<std::string> required_attrs;     // list of all required room attributes for this course
-	std::set<std::string> parallel_courses;   // list of all parallel courses (id)
-	std::set<std::string> orthogonal_courses; // list of all orthogonal courses (id)
-	std::set<std::string> follow_courses;     // list of all courses that must immediately follow this one
+	std::set<std::string> required_attrs; // list of all required room attributes for this course
 
-	std::string schedule; // if present, this is the id of the schedule that this course MUST be in
+	std::set<course*> parallel_courses;   // list of all parallel courses (id)
+	std::set<course*> orthogonal_courses; // list of all orthogonal courses (id)
+	std::set<course*> follow_courses;     // list of all courses that must immediately follow this one
+
+	schedule *required_schedule = nullptr; // if present, this is the id of the schedule that this course MUST be in
 };
 struct constraint_set
 {
-	// rooms and scheudles are backed by lists rather than just thrown into unordered_map directly because iteration order matters.
-	// for rooms, we need to output the schedule table in a predictable order - for schedules we need to attempt to schedule courses in a predictable way.
-	// instructors is backed by a list because courses hold a pointer to their instructor directly to avoid lookup
-
-	std::list<room>       rooms;       // a list of all the rooms
-	std::list<schedule>   schedules;   // a list of all the schedules
-	std::list<instructor> instructors; // a list of all instructors
+	std::deque<room>       rooms;       // a list of all the rooms
+	std::deque<schedule>   schedules;   // a list of all the schedules
+	std::deque<instructor> instructors; // a list of all instructors
+	std::deque<course>     courses;     // a list of all courses
 
 	std::unordered_map<std::string, room*>       rooms_map;       // maps from room id to the room
 	std::unordered_map<std::string, schedule*>   schedules_map;   // maps from schedule id to the schedule
 	std::unordered_map<std::string, instructor*> instructors_map; // a list of all instructors - maps id to instructor info
-
-	std::unordered_map<std::string, course_info> courses; // a list of all courses - maps id to course info
+	std::unordered_map<std::string, course*>     courses_map;     // a list of all courses - maps id to course info
 };
 
 // skips white space but stops on new line characters (extracts it).
@@ -218,7 +218,7 @@ struct line_term_t
 struct constraint_parser_pack
 {
 	constraint_set c;
-	std::set<std::string> str_set;
+	std::set<course*> course_set;
 	std::string str, err;
 	std::istream &f;
 	const char *const path;
@@ -234,7 +234,7 @@ struct constraint_parser_pack
 		assert(f); // guaranteed to succeed from above
 
 		// make sure a room with the same name doesn't already exist
-		if (c.courses.find(str) != c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - a room with this id already exists"; return false; }
+		if (c.courses_map.find(str) != c.courses_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - a room with this id already exists"; return false; }
 
 		// create the new room and link to to the lookup table
 		room &r = c.rooms.emplace_back();
@@ -309,8 +309,10 @@ struct constraint_parser_pack
 		assert(f); // guaranteed to succeed from above
 
 		// insert a new course into the set (make sure it doesn't already exist)
-		if (c.courses.find(str) != c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to respecify existing course: " + str; return false; }
-		course_info &info = c.courses[std::move(str)];
+		if (c.courses_map.find(str) != c.courses_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to respecify existing course: " + str; return false; }
+		course &info = c.courses.emplace_back();
+		info.id = str;
+		c.courses_map.emplace(std::move(str), &info);
 
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected course capacity"; return false; }
 		if (!(f >> info.capacity)) { err = std::string(path) + ':' + std::to_string(ln) + " - failed to parse course capacity"; return false; }
@@ -341,8 +343,8 @@ struct constraint_parser_pack
 		assert(f); // guaranteed to succeed from above
 
 		// find the course being constrained
-		auto it = c.courses.find(str);
-		if (it == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
+		auto it = c.courses_map.find(str);
+		if (it == c.courses_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
 
 		// gather all the tokens
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected one or more room attributes"; return false; }
@@ -350,35 +352,35 @@ struct constraint_parser_pack
 		{
 			f >> str;
 			assert(f); // guaranteed to succeed from above
-			it->second.required_attrs.insert(std::move(str)); // add requirement (duplicates are no-op)
+			it->second->required_attrs.insert(std::move(str)); // add requirement (duplicates are no-op)
 		} while (!line_term() && f);
 
 		return true;
 	}
 	bool _parse_parallel_orthogonal()
 	{
+		// we handle parallel and orthogonal with same code - use this to separate the semantics
+		const auto bucket = str == "parallel" ? &course::parallel_courses : &course::orthogonal_courses;
+
 		// parse the course list
-		str_set.clear();
+		course_set.clear();
 		while (!line_term() && f)
 		{
-			std::string s;
-			f >> s;
+			f >> str;
 			assert(f); // guaranteed to succeed from above
-			if (c.courses.find(s) == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + s; return false; }
-			str_set.insert(std::move(s));
+			auto it = c.courses_map.find(str);
+			if (it == c.courses_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
+			course_set.insert(it->second);
 		}
-		if (str_set.size() < 2) { err = std::string(path) + ':' + std::to_string(ln) + " - expected two or more course ids"; return false; }
-
-		// we handle parallel and orthogonal with same code - use this to separate the semantics
-		const auto bucket = str == "parallel" ? &course_info::parallel_courses : &course_info::orthogonal_courses;
+		if (course_set.size() < 2) { err = std::string(path) + ':' + std::to_string(ln) + " - expected two or more course ids"; return false; }
 
 		// apply constraints
-		for (auto &dest_id : str_set)
+		for (auto *dest : course_set)
 		{
-			auto &dest = c.courses.at(dest_id).*bucket; // get the destination set
-			for (auto &constraint : str_set) if (&dest_id != &constraint)
+			auto &b = dest->*bucket; // get the destination set
+			for (auto *constraint : course_set) if (dest != constraint)
 			{
-				dest.insert(constraint); // add all other constraints to dest
+				b.insert(constraint); // add all other constraints to dest
 			}
 		}
 
@@ -391,21 +393,21 @@ struct constraint_parser_pack
 		assert(f); // guaranteed to succeed from above
 
 		// find the course being constrained (first)
-		auto first = c.courses.find(str);
-		if (first == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
+		auto first = c.courses_map.find(str);
+		if (first == c.courses_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
 
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected a second course id"; return false; }
 		f >> str;
 		assert(f); // guaranteed to succeed from above
 
 		// find the course being constrained (second)
-		auto second = c.courses.find(str);
-		if (second == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
+		auto second = c.courses_map.find(str);
+		if (second == c.courses_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
 
 		if (!line_term() && f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected only two arguments"; return false; }
 
 		// apply the constraint
-		first->second.follow_courses.insert(second->first);
+		first->second->follow_courses.insert(second->second);
 
 		return true;
 	}
@@ -416,21 +418,21 @@ struct constraint_parser_pack
 		assert(f); // guaranteed to succeed from above
 
 		// find the course being constrained
-		auto it = c.courses.find(str);
-		if (it == c.courses.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
+		auto it = c.courses_map.find(str);
+		if (it == c.courses_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
 
 		// get the schedule id
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected a schedule id"; return false; }
 		f >> str;
 		assert(f); // guaranteed to succeed from above
+		auto sched_ref = c.schedules_map.find(str);
+		if (sched_ref == c.schedules_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - reference to undefined schedule: " + str; return false; }
 
 		// if there's already a schedule constraint for this course and they differ, it's a problem
-		std::string &sch = it->second.schedule;
-		if (!sch.empty() && sch != str) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to override pre-existing schedule constraint: " + sch + " -> " + str; return false; }
+		if (schedule *old = it->second->required_schedule; old && old != sched_ref->second) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to override pre-existing schedule constraint: " + old->id + " -> " + str; return false; }
 
-		// if this is an unknown course, it's a problem
-		if (c.schedules_map.find(str) == c.schedules_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - reference to undefined schedule: " + str; return false; }
-		sch = str; // apply the constraint
+		// apply the constraint
+		it->second->required_schedule = sched_ref->second;
 
 		if (!line_term() && f) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected tokens encountered after schedule id"; return false; }
 
@@ -517,28 +519,32 @@ struct satisfy_info
 public:
 	constraint_set &constraints;
 
-	std::list<std::list<std::set<std::string>>>                            follow_chains;            // list of all follow chains in the course topology
-	std::unordered_map<const std::list<std::set<std::string>>*, schedule*> follow_chain_to_schedule; // maps each follow chain to its required schedule or nullptr if no specific schedule is required
+	std::list<std::list<std::set<const course*>>>                            follow_chains;            // list of all follow chains in the course topology
+	std::unordered_map<const std::list<std::set<const course*>>*, schedule*> follow_chain_to_schedule; // maps each follow chain to its required schedule or nullptr if no specific schedule is required
 
 	// maps schedules to a map from follow chain to valid start index - used to severely prune state space for some types of constraints
-	std::unordered_map<const schedule*, std::unordered_map<const std::list<std::set<std::string>>*, std::vector<std::size_t>>> schedule_to_follow_chain_to_start_index;
+	std::unordered_map<const schedule*, std::unordered_map<const std::list<std::set<const course*>>*, std::vector<std::size_t>>> schedule_to_follow_chain_to_start_index;
+
+	std::unordered_map<const course*, std::vector<std::size_t>> course_to_satisfiable_rooms; // maps each course to the set of all its satisfiable rooms based on room attrs
+
+	std::unordered_map<const std::set<const course*>*, std::set<const instructor*>> pset_to_instructors; // maps any pset to its set of instructors
 
 	// constructs a new satisfiability info object
 	// if this throws it means that the system is impossibly-constrained (as opposed to just being unsatisfiable)
 	satisfy_info(constraint_set &_c) : constraints(_c)
 	{
-		std::list<std::set<std::string>>                                               psets;                  // list of all parallel course sets
-		std::unordered_map<std::string, std::list<std::set<std::string>>::iterator>    course_to_pset;         // maps each course to its pset
-		std::unordered_map<const std::set<std::string>*, const std::set<std::string>*> follow_psets;           // maps a pset to its follow pset (if any)
-		std::vector<std::list<std::set<std::string>>::iterator>                        fset;                   // temporary for building follow sets
-		bool                                                                           fmerge;                 // flag for looping construction logic
-		std::unordered_map<const std::set<std::string>*, time_union>                   pset_to_unavailability; // maps each pset to its total unavailability union
+		std::list<std::set<const course*>>                                                 psets;                  // list of all parallel course sets
+		std::unordered_map<const course*, std::list<std::set<const course*>>::iterator>    course_to_pset;         // maps each course to its pset
+		std::unordered_map<const std::set<const course*>*, const std::set<const course*>*> follow_psets;           // maps a pset to its follow pset (if any)
+		std::vector<std::list<std::set<const course*>>::iterator>                          fset;                   // temporary for building follow sets
+		bool                                                                               fmerge;                 // flag for looping construction logic
+		std::unordered_map<const std::set<const course*>*, time_union>                     pset_to_unavailability; // maps each pset to its total unavailability union
 
 		// construct the trivial form of the parallel topology structure - just a bunch of bookmarked singletons
 		for (const auto &entry : constraints.courses)
 		{
-			psets.emplace_back().insert(entry.first);
-			course_to_pset.emplace(entry.first, std::prev(psets.end()));
+			psets.emplace_back().insert(&entry);
+			course_to_pset.emplace(&entry, std::prev(psets.end()));
 		}
 
 		// now apply all parallel constraints
@@ -547,17 +553,17 @@ public:
 			bool merged = false;
 
 			// for each course in the current parallel set
-			for (const auto &p : *pos)
+			for (const auto *p : *pos)
 			{
 				// for each parallel constraint
-				for (const auto &pp : constraints.courses.at(p).parallel_courses)
+				for (const auto *pp : p->parallel_courses)
 				{
 					// get its parallel set - if it's us skip it
 					auto it = course_to_pset.at(pp);
 					if (it == pos) continue;
 
 					// merge it into our parallel set and account for all mapping updates
-					for (const auto &ppp : *it) course_to_pset.at(ppp) = pos;
+					for (const auto *ppp : *it) course_to_pset.at(ppp) = pos;
 					pos->merge(*it);
 					psets.erase(it);
 					merged = true;
@@ -580,9 +586,9 @@ public:
 				for (auto other = psets.begin(); other != psets.end(); ++other)
 				{
 					bool inserted = false;
-					for (const auto &p : *other)
+					for (const auto *p : *other)
 					{
-						for (const auto &pp : constraints.courses.at(p).follow_courses)
+						for (const auto *pp : p->follow_courses)
 						{
 							// get the follow pset
 							auto val = course_to_pset.at(pp);
@@ -605,7 +611,7 @@ public:
 				const auto dest = fset[0];
 				for (std::size_t i = 1; i < fset.size(); ++i)
 				{
-					for (const auto &g : *fset[i]) course_to_pset.at(g) = dest;
+					for (const auto *g : *fset[i]) course_to_pset.at(g) = dest;
 					dest->merge(*fset[i]);
 					psets.erase(fset[i]);
 				}
@@ -627,9 +633,9 @@ public:
 			{
 				// generate the fset
 				fset.clear();
-				for (const auto &i : pset)
+				for (const auto *i : pset)
 				{
-					for (const auto &j : constraints.courses.at(i).follow_courses)
+					for (const auto *j : i->follow_courses)
 					{
 						auto val = course_to_pset.at(j);
 						if (std::find(fset.begin(), fset.end(), val) == fset.end()) fset.push_back(val); // add to fset but don't take duplicates
@@ -644,7 +650,7 @@ public:
 				const auto dest = fset[0];
 				for (std::size_t i = 1; i < fset.size(); ++i)
 				{
-					for (const auto &g : *fset[i]) course_to_pset.at(g) = dest;
+					for (const auto *g : *fset[i]) course_to_pset.at(g) = dest;
 					dest->merge(*fset[i]);
 					psets.erase(fset[i]);
 				}
@@ -704,31 +710,26 @@ public:
 		// now we need to generate the follow chain schedule requirements map
 		for (const auto &chain : follow_chains)
 		{
-			schedule          *required_schedule = nullptr; // keep track of the required schedule for this follow chain
-			const std::string *source = nullptr;            // also keep track of the source for this constraint for error messages
+			schedule     *required_schedule = nullptr; // keep track of the required schedule for this follow chain
+			const course *source = nullptr;            // also keep track of the source for this constraint for error messages
 			
 			for (const auto &pset : chain)
 			{
-				for (const auto &p : pset)
+				for (const auto *p : pset)
 				{
-					// get this course - if it doesn't require a specific schedule skip it
-					const course_info &course = constraints.courses.at(p);
-					if (course.schedule.empty()) continue;
-
-					// get the required schedule for this course
-					auto sched = constraints.schedules_map.find(course.schedule);
-					assert(sched != constraints.schedules_map.end()); // this should have been guaranteed prior to invoking the constructor
+					// get this course - if this course doesn't require a specific schedule skip it
+					if (!p->required_schedule) continue;
 
 					// if there's a required schedule for this chain we need to match it
 					if (required_schedule)
 					{
-						if (required_schedule != sched->second) throw std::logic_error(std::string("conflicting schedule specifiers in same follow chain: ") + *source + " -> " + required_schedule->id + " vs " + p + " -> " + course.schedule);
+						if (required_schedule != p->required_schedule) throw std::logic_error(std::string("conflicting schedule specifiers in same follow chain: ") + source->id + " -> " + required_schedule->id + " vs " + p->id + " -> " + p->required_schedule->id);
 					}
 					// otherwise just mark this as the new required schedule for the chain
 					else
 					{
-						required_schedule = sched->second;
-						source = &p;
+						required_schedule = p->required_schedule;
+						source = p;
 					}
 				}
 			}
@@ -736,21 +737,29 @@ public:
 			follow_chain_to_schedule.emplace(&chain, required_schedule); // add this chain to the map
 		}
 
-		// now we generate the total unavailability unions for each pset
+		// now we generate the total unavailability unions for each pset, as well as the instructor sets
 		for (const auto &chain : follow_chains)
 		{
 			for (const auto &pset : chain)
 			{
-				time_union u;
-				for (const auto &i : pset) u.add(constraints.courses.at(i).instructor->unavailability);
-				pset_to_unavailability.emplace(&pset, std::move(u));
+				time_union                  unavail;
+				std::set<const instructor*> instructors;
+
+				for (const auto *i : pset)
+				{
+					unavail.add(i->instructor->unavailability);
+					instructors.insert(i->instructor);
+				}
+
+				pset_to_unavailability.emplace(&pset, std::move(unavail));
+				pset_to_instructors.emplace(&pset, std::move(instructors));
 			}
 		}
 
 		// examine each schedule
 		for (const auto &sched : constraints.schedules)
 		{
-			std::unordered_map<const std::list<std::set<std::string>>*, std::vector<std::size_t>> follow_chain_to_start_index;
+			std::unordered_map<const std::list<std::set<const course*>>*, std::vector<std::size_t>> follow_chain_to_start_index;
 
 			// and each follow chain
 			for (const auto &chain : follow_chains)
@@ -787,6 +796,34 @@ public:
 			// insert into the schedule map
 			schedule_to_follow_chain_to_start_index.emplace(&sched, std::move(follow_chain_to_start_index));
 		}
+
+		// build map from each course to its set of satisfiable rooms
+		for (const auto &course : constraints.courses)
+		{
+			std::vector<std::size_t> valid_rooms;
+
+			for (std::size_t i = 0; i < constraints.rooms.size(); ++i)
+			{
+				if (constraints.rooms[i].capacity < course.capacity) continue;
+
+				const auto &attrs = constraints.rooms[i].attr;
+
+				bool valid = true;
+				for (const auto &attr : course.required_attrs)
+				{
+					if (attrs.find(attr) == attrs.end())
+					{
+						valid = false;
+						break;
+					}
+				}
+				if (valid) valid_rooms.push_back(i);
+			}
+
+			if (valid_rooms.empty()) throw std::logic_error(std::string("course ") + course.id + " has no valid rooms due to required attr constraints");
+
+			course_to_satisfiable_rooms.emplace(&course, std::move(valid_rooms));
+		}
 	}
 
 	void print_topology(std::ostream &ostr)
@@ -798,13 +835,7 @@ public:
 			for (const auto &s : chain)
 			{
 				ostr << "    ";
-				for (const auto &ss : s) ostr << ' ' << std::setw(16) << ss;
-				/*if (const auto &unavail = pset_to_unavailability.at(&s); !unavail.empty())
-				{
-					ostr << "    (unavailable:";
-					for (const auto &i : unavail.content) ostr << ' ' << i;
-					ostr << ')';
-				}*/
+				for (const auto *ss : s) ostr << ' ' << std::setw(16) << ss->id;
 				ostr << '\n';
 			}
 		}
@@ -816,12 +847,12 @@ public:
 	bool satisfy();
 
 private:
-	bool satisfy_fchain(std::list<std::list<std::set<std::string>>>::const_iterator chain);
-	bool satisfy_pset_at(std::list<std::list<std::set<std::string>>>::const_iterator chain, schedule &sched, std::size_t slot_i, std::list<std::set<std::string>>::const_iterator pset);
-	bool satisfy_pset_at_interior(std::list<std::list<std::set<std::string>>>::const_iterator chain, schedule &sched, std::size_t slot_i, std::list<std::set<std::string>>::const_iterator pset, std::set<std::string>::const_iterator ppos);
+	bool satisfy_fchain(std::list<std::list<std::set<const course*>>>::const_iterator chain);
+	bool satisfy_pset_at(std::list<std::list<std::set<const course*>>>::const_iterator chain, schedule &sched, std::size_t slot_i, std::list<std::set<const course*>>::const_iterator pset);
+	bool satisfy_pset_at_interior(std::list<std::list<std::set<const course*>>>::const_iterator chain, schedule &sched, std::size_t slot_i, std::list<std::set<const course*>>::const_iterator pset, std::set<const course*>::const_iterator ppos);
 };
 
-bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<std::set<std::string>>>::const_iterator chain, schedule &sched, std::size_t slot_i, std::list<std::set<std::string>>::const_iterator pset, std::set<std::string>::const_iterator ppos)
+bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<std::set<const course*>>>::const_iterator chain, schedule &sched, std::size_t slot_i, std::list<std::set<const course*>>::const_iterator pset, std::set<const course*>::const_iterator ppos)
 {
 	// if we're at the end of the current pset, we're done with this pset
 	if (ppos == pset->end())
@@ -830,36 +861,22 @@ bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<std::set<std::st
 		return satisfy_pset_at(chain, sched, slot_i + 1, std::next(pset));
 	}
 
-	const auto &course = constraints.courses.at(*ppos);
+	const auto &course = **ppos;
 	timeslot   &slot = sched.slots[slot_i];
 
 	// attempt to put it into each available room
-	auto r = constraints.rooms.begin();
-	for (std::size_t k = 0; k < slot.assignments.size(); ++k, ++r)
+	assert(slot.assignments.size() == constraints.rooms.size());
+	for (std::size_t k : course_to_satisfiable_rooms.at(&course))
 	{
-		assert(r != constraints.rooms.end()); // this should never happen
-
 		// if this room is already taken, it's not viable
-		if (!slot.assignments[k].empty()) continue;
-		// if this room doesn't have a high enough capacity, it's not viable
-		if (r->capacity < course.capacity) continue;
-
-		// if this room lacks any required attributes, it's not viable
-		if ([&] {
-			const auto &attrs = r->attr;
-				for (const auto &req : course.required_attrs)
-				{
-					if (attrs.find(req) == attrs.end()) return true;
-				}
-			return false;
-		}()) continue;
+		if (slot.assignments[k]) continue;
 
 		// if we violate an orthogonality constraint, it's not viable
 		if ([&] {
 			const auto &ortho = course.orthogonal_courses;
-				for (const auto &other_assignment : slot.assignments)
+				for (const auto *other_assignment : slot.assignments)
 				{
-					if (ortho.find(other_assignment) != ortho.end()) return true;
+					if (ortho.find(const_cast<::course*>(other_assignment)) != ortho.end()) return true;
 				}
 			return false;
 		}()) continue;
@@ -873,22 +890,30 @@ bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<std::set<std::st
 		if (satisfy_pset_at_interior(chain, sched, slot_i, pset, std::next(ppos))) return true;
 
 		// otherwise undo the change and continue searching
-		slot.assignments[k].clear();
+		slot.assignments[k] = nullptr;
 	}
 
 	return false;
 }
-bool satisfy_info::satisfy_pset_at(std::list<std::list<std::set<std::string>>>::const_iterator chain, schedule &sched, std::size_t slot_i, std::list<std::set<std::string>>::const_iterator pset)
+bool satisfy_info::satisfy_pset_at(std::list<std::list<std::set<const course*>>>::const_iterator chain, schedule &sched, std::size_t slot_i, std::list<std::set<const course*>>::const_iterator pset)
 {
 	// if we're at the end of the follow chain, we're done with this chain - recurse to the next
 	if (pset == chain->end()) return satisfy_fchain(std::next(chain));
 
 	assert(slot_i < sched.slots.size()); // sanity check
+	timeslot &slot = sched.slots[slot_i];
+	const auto &instructors = pset_to_instructors.at(&*pset);
+
+	// if this timeslot is already scheduled for any instructor in this pset it's no good
+	for (const auto *ins : slot.assignments)
+	{
+		if (ins && instructors.find(ins->instructor) != instructors.end()) return false;
+	}
 
 	// otherwise recurse into the pset
 	return satisfy_pset_at_interior(chain, sched, slot_i, pset, pset->begin());
 }
-bool satisfy_info::satisfy_fchain(std::list<std::list<std::set<std::string>>>::const_iterator chain)
+bool satisfy_info::satisfy_fchain(std::list<std::list<std::set<const course*>>>::const_iterator chain)
 {
 	// if we're at the end of the follow chains we're done and have scheduled everything successfully (yay)
 	if (chain == follow_chains.end()) return true;
@@ -954,14 +979,13 @@ void print_schedule_latex(std::ostream &ostr, const constraint_set &c, const sch
 	for (const auto &timeslot : sched.slots)
 	{
 		ostr << timeslot.time;
-		for (const auto &asgn : timeslot.assignments)
+		for (const auto *asgn : timeslot.assignments)
 		{
 			ostr << " & ";
-			if (!asgn.empty())
+			if (asgn)
 			{
-				const auto &course = c.courses.at(asgn);
-				ostr << fix_id(asgn) << ' ' << fix_id(course.instructor->id);
-				if (!course.notes.empty()) ostr << ' ' << course.notes;
+				ostr << fix_id(asgn->id) << ' ' << fix_id(asgn->instructor->id);
+				if (!asgn->notes.empty()) ostr << ' ' << asgn->notes;
 			}
 		}
 		ostr << " \\\\\n\\hline ";
@@ -991,14 +1015,13 @@ void print_schedule_text(std::ostream &ostr, const constraint_set &c, const sche
 	for (const auto &timeslot : sched.slots)
 	{
 		ostr << timeslot.time;
-		for (const auto &asgn : timeslot.assignments)
+		for (const auto *asgn : timeslot.assignments)
 		{
 			ostr << '\t';
-			if (!asgn.empty())
+			if (asgn)
 			{
-				const auto &course = c.courses.at(asgn);
-				ostr << fix_id(asgn) << ' ' << fix_id(course.instructor->id);
-				if (!course.notes.empty()) ostr << ' ' << course.notes;
+				ostr << fix_id(asgn->id) << ' ' << fix_id(asgn->instructor->id);
+				if (!asgn->notes.empty()) ostr << ' ' << asgn->notes;
 			}
 		}
 		ostr << '\n';
