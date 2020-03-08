@@ -361,7 +361,8 @@ struct constraint_parser_pack
 	bool _parse_parallel_orthogonal()
 	{
 		// we handle parallel and orthogonal with same code - use this to separate the semantics
-		const auto bucket = str == "parallel" ? &course_t::parallel_courses : &course_t::orthogonal_courses;
+		const bool is_parallel = str == "parallel";
+		const auto bucket = is_parallel ? &course_t::parallel_courses : &course_t::orthogonal_courses;
 
 		// parse the course list
 		course_set.clear();
@@ -371,7 +372,7 @@ struct constraint_parser_pack
 			assert(f); // guaranteed to succeed from above
 			auto it = c.courses_map.find(str);
 			if (it == c.courses_map.end()) { err = std::string(path) + ':' + std::to_string(ln) + " - attempt to constrain undefined course: " + str; return false; }
-			course_set.insert(it->second);
+			if (!course_set.insert(it->second).second) { err = std::string(path) + ':' + std::to_string(ln) + " - course " + str + " was already specified"; return false; }
 		}
 		if (course_set.size() < 2) { err = std::string(path) + ':' + std::to_string(ln) + " - expected two or more course ids"; return false; }
 
@@ -518,28 +519,31 @@ std::variant<constraint_set, std::string> read_constraints(std::istream &f, cons
 struct satisfy_info
 {
 public:
+	typedef std::set<const course_t*> pset_t;
+
 	constraint_set &constraints;
 
-	std::list<std::list<std::set<const course_t*>>>                              follow_chains;            // list of all follow chains in the course topology
-	std::unordered_map<const std::list<std::set<const course_t*>>*, schedule_t*> follow_chain_to_schedule; // maps each follow chain to its required schedule or nullptr if no specific schedule is required
+	std::list<std::list<pset_t>>                              follow_chains;            // list of all follow chains in the course topology
+	std::unordered_map<const std::list<pset_t>*, schedule_t*> follow_chain_to_schedule; // maps each follow chain to its required schedule or nullptr if no specific schedule is required
 
 	// maps schedules to a map from follow chain to valid start index - used to severely prune state space for some types of constraints
-	std::unordered_map<const schedule_t*, std::unordered_map<const std::list<std::set<const course_t*>>*, std::vector<std::size_t>>> schedule_to_follow_chain_to_start_index;
+	std::unordered_map<const schedule_t*, std::unordered_map<const std::list<pset_t>*, std::vector<std::size_t>>> schedule_to_follow_chain_to_start_index;
 
 	std::unordered_map<const course_t*, std::vector<std::size_t>> course_to_satisfiable_rooms; // maps each course to the set of all its satisfiable rooms based on room attrs
 
-	std::unordered_map<const std::set<const course_t*>*, std::set<const instructor_t*>> pset_to_instructors; // maps any pset to its set of instructors
+	std::unordered_map<const pset_t*, std::set<const instructor_t*>> pset_to_instructors;   // maps any pset to its set of instructors
+	std::unordered_map<const pset_t*, std::set<const course_t*>>     pset_to_ortho_courses; // maps each pset to the set of courses it is orthogonal to
 
 	// constructs a new satisfiability info object
 	// if this throws it means that the system is impossibly-constrained (as opposed to just being unsatisfiable)
 	satisfy_info(constraint_set &_c) : constraints(_c)
 	{
-		std::list<std::set<const course_t*>>                                                   psets;                  // list of all parallel course sets
-		std::unordered_map<const course_t*, std::list<std::set<const course_t*>>::iterator>    course_to_pset;         // maps each course to its pset
-		std::unordered_map<const std::set<const course_t*>*, const std::set<const course_t*>*> follow_psets;           // maps a pset to its follow pset (if any)
-		std::vector<std::list<std::set<const course_t*>>::iterator>                            fset;                   // temporary for building follow sets
-		bool                                                                                   fmerge;                 // flag for looping construction logic
-		std::unordered_map<const std::set<const course_t*>*, time_union>                       pset_to_unavailability; // maps each pset to its total unavailability union
+		std::list<pset_t>                                                psets;                  // list of all parallel course sets
+		std::unordered_map<const course_t*, std::list<pset_t>::iterator> course_to_pset;         // maps each course to its pset
+		std::unordered_map<const pset_t*, const pset_t*>                 follow_psets;           // maps a pset to its follow pset (if any)
+		std::vector<std::list<pset_t>::iterator>                         fset;                   // temporary for building follow sets
+		bool                                                             fmerge;                 // flag for looping construction logic
+		std::unordered_map<const pset_t*, time_union>                    pset_to_unavailability; // maps each pset to its total unavailability union
 
 		// construct the trivial form of the parallel topology structure - just a bunch of bookmarked singletons
 		for (const auto &entry : constraints.courses)
@@ -738,29 +742,36 @@ public:
 			follow_chain_to_schedule.emplace(&chain, required_schedule); // add this chain to the map
 		}
 
-		// now we generate the total unavailability unions for each pset, as well as the instructor sets
+		// now we generate the total unavailability unions for each pset, as well as the instructor sets and ortho pset families
 		for (const auto &chain : follow_chains)
 		{
 			for (const auto &pset : chain)
 			{
 				time_union                    unavail;
 				std::set<const instructor_t*> instructors;
+				std::set<const course_t*>     ortho_courses;
 
 				for (const auto *i : pset)
 				{
 					unavail.add(i->instructor->unavailability);
 					instructors.insert(i->instructor);
+					for (const auto *ortho : i->orthogonal_courses)
+					{
+						if (&*course_to_pset.at(ortho) == &pset) throw std::logic_error(std::string("pset encountered which is orthogonal to itself via ") + ortho->id);
+						ortho_courses.insert(ortho);
+					}
 				}
 
 				pset_to_unavailability.emplace(&pset, std::move(unavail));
 				pset_to_instructors.emplace(&pset, std::move(instructors));
+				pset_to_ortho_courses.emplace(&pset, std::move(ortho_courses));
 			}
 		}
 
 		// examine each schedule
 		for (const auto &sched : constraints.schedules)
 		{
-			std::unordered_map<const std::list<std::set<const course_t*>>*, std::vector<std::size_t>> follow_chain_to_start_index;
+			std::unordered_map<const std::list<pset_t>*, std::vector<std::size_t>> follow_chain_to_start_index;
 
 			// and each follow chain
 			for (const auto &chain : follow_chains)
@@ -848,12 +859,12 @@ public:
 	bool satisfy();
 
 private:
-	bool satisfy_fchain(std::list<std::list<std::set<const course_t*>>>::const_iterator chain);
-	bool satisfy_pset_at(std::list<std::list<std::set<const course_t*>>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<std::set<const course_t*>>::const_iterator pset);
-	bool satisfy_pset_at_interior(std::list<std::list<std::set<const course_t*>>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<std::set<const course_t*>>::const_iterator pset, std::set<const course_t*>::const_iterator ppos);
+	bool satisfy_fchain(std::list<std::list<pset_t>>::const_iterator chain);
+	bool satisfy_pset_at(std::list<std::list<pset_t>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<pset_t>::const_iterator pset);
+	bool satisfy_pset_at_interior(std::list<std::list<pset_t>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<pset_t>::const_iterator pset, pset_t::const_iterator ppos);
 };
 
-bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<std::set<const course_t*>>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<std::set<const course_t*>>::const_iterator pset, std::set<const course_t*>::const_iterator ppos)
+bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<pset_t>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<pset_t>::const_iterator pset, pset_t::const_iterator ppos)
 {
 	// if we're at the end of the current pset, we're done with this pset
 	if (ppos == pset->end())
@@ -872,18 +883,6 @@ bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<std::set<const c
 		// if this room is already taken, it's not viable
 		if (slot.assignments[k]) continue;
 
-		// if we violate an orthogonality constraint, it's not viable
-		if ([&] {
-			const auto &ortho = course.orthogonal_courses;
-				for (const auto *other_assignment : slot.assignments)
-				{
-					if (ortho.find(const_cast<course_t*>(other_assignment)) != ortho.end()) return true;
-				}
-			return false;
-		}()) continue;
-
-		// ----------------------------------------------------------------
-
 		// assign current course to this schedule, timeslot, and room
 		slot.assignments[k] = *ppos;
 
@@ -896,7 +895,7 @@ bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<std::set<const c
 
 	return false;
 }
-bool satisfy_info::satisfy_pset_at(std::list<std::list<std::set<const course_t*>>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<std::set<const course_t*>>::const_iterator pset)
+bool satisfy_info::satisfy_pset_at(std::list<std::list<pset_t>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<pset_t>::const_iterator pset)
 {
 	// if we're at the end of the follow chain, we're done with this chain - recurse to the next
 	if (pset == chain->end()) return satisfy_fchain(std::next(chain));
@@ -904,17 +903,24 @@ bool satisfy_info::satisfy_pset_at(std::list<std::list<std::set<const course_t*>
 	assert(slot_i < sched.slots.size()); // sanity check
 	timeslot_t &slot = sched.slots[slot_i];
 	const auto &instructors = pset_to_instructors.at(&*pset);
+	const auto &orthos = pset_to_ortho_courses.at(&*pset);
 
-	// if this timeslot is already scheduled for any instructor in this pset it's no good
+	// examine each assignment for this timeslot
 	for (const auto *ins : slot.assignments)
 	{
-		if (ins && instructors.find(ins->instructor) != instructors.end()) return false;
+		if (!ins) continue;
+
+		// if this timeslot is already scheduled for any instructor in this pset it's no good (instructor can't be in two places at once)
+		if (instructors.find(ins->instructor) != instructors.end()) return false;
+
+		// if this timeslot holds an orthogonal course it's no good
+		if (orthos.find(ins) != orthos.end()) return false;
 	}
 
 	// otherwise recurse into the pset
 	return satisfy_pset_at_interior(chain, sched, slot_i, pset, pset->begin());
 }
-bool satisfy_info::satisfy_fchain(std::list<std::list<std::set<const course_t*>>>::const_iterator chain)
+bool satisfy_info::satisfy_fchain(std::list<std::list<pset_t>>::const_iterator chain)
 {
 	// if we're at the end of the follow chains we're done and have scheduled everything successfully (yay)
 	if (chain == follow_chains.end()) return true;
