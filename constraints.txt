@@ -21,8 +21,9 @@
 # start and stop denote the timeslot bounds and take the form hh:mm in 24hr (military) time.
 
 # 'instructor' introduces a new instructor.
-# usage: instructor [id]
+# usage: instructor [id] [max_adj_courses]
 # id is the name of the instructor.
+# max_adj_courses is the maximum number of adjacent courses an instructor will be scheduled to teach.
 
 # 'course' introduces a new named course.
 # usage: course [id] [capacity] [instructor] [notes...]
@@ -39,7 +40,7 @@
 # start and stop denote the unavailable time (no classes will be scheduled for this instructor during this time)
 # multiple unavailable constraints for the same instructor will be merged together.
 
-# 'requires' adds a requiresd room attribute to a pre-existing course
+# 'requires' adds a required room attribute to a pre-existing course
 # usage: requires [id] [attr]...
 # attributes are defined by the (separate) rooms file.
 
@@ -84,21 +85,21 @@ timeslot MWF 18:00-19:25
 
 # -----------------------------------------------------------
 
-instructor Sarkar
-instructor Williams
-instructor Gu
-instructor Smith
-instructor Untch
-instructor Li
-instructor Al-Tobasei
-instructor Aderholdt
-instructor Pettey
-instructor Barbosa
-instructor Phillips
-instructor Seo
-instructor Dong
-instructor Butler
-instructor Johnson
+instructor Sarkar     2
+instructor Williams   2
+instructor Gu         2
+instructor Smith      2
+instructor Untch      2
+instructor Li         2
+instructor Al-Tobasei 2
+instructor Aderholdt  2
+instructor Pettey     2
+instructor Barbosa    2
+instructor Phillips   3 # dr. Phillips has 3 max adj courses instead of 2 due to teaching 3130-01
+instructor Seo        2
+instructor Dong       2
+instructor Butler     2
+instructor Johnson    2
 
 # EXAMPLE: this isn't a real-world constraint - it's just meant to give an example of this constraint
 unavailable Phillips 0:00-12:00
@@ -111,9 +112,9 @@ schedule 1010-01 MWF
 
 course 1150-01       30 Williams
 course 1150-01L      30 Williams
-course 1150-03       60 Gu MW only
-course 1150-03L*1    30 Gu MW only
-course 1150-03L*2    30 Gu MW only
+course 1150-03       80 Gu MW only
+course 1150-03L*1    40 Gu MW only
+course 1150-03L*2    40 Gu MW only
 course 1150-04       30 Gu MW only
 course 1150-04L      30 Gu MW only
 course 1150-05       30 Williams
@@ -249,7 +250,7 @@ follows 3240/6050-01 3240/6050-01L
 course 4/5160-01     50 Dong MW only
 course 4/5360-01     30 Li
 course 4/5410-01     30 Butler
-course 4/5850-01     30 Phillips
+course 4/5850-01     50 Phillips
 course 4/5700-01     50 Sarkar MW only
 
 schedule 4/5700-01 MWF

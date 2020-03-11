@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cassert>
+#include <functional>
 
 void print_time(std::ostream &ostr, int time)
 {
@@ -114,35 +115,91 @@ struct time_union
 
 	bool empty() const noexcept { return content.empty(); }
 };
+struct index_union
+{
+	std::vector<std::size_t> counts;
+
+	// creates an index union with the specified number of possible indexes - all slots are defaulted to not set
+	explicit index_union(std::size_t n) : counts(n, 0) {}
+
+	// checks if the specified index is set
+	bool is_set(std::size_t index)
+	{
+		assert(index < counts.size());
+		return counts[index] != 0;
+	}
+
+	// adds the specified index to the union and returns the size of the contiguous region it creates
+	std::size_t add(std::size_t index)
+	{
+		assert(index < counts.size());
+		assert(counts[index] == 0);
+
+		// compute total range of resulting contiguous region [start, stop)
+		std::size_t start = index == 0 ? 0 : index - counts[index - 1];
+		std::size_t stop = index == counts.size() - 1 ? counts.size() : index + 1 + counts[index + 1];
+
+		// apply updated counts
+		std::size_t count = stop - start;
+		for (std::size_t i = start; i < stop; ++i) counts[i] = count;
+		return count;
+	}
+	// removes the specified index from the union
+	void remove(std::size_t index)
+	{
+		assert(index < counts.size());
+		assert(counts[index] != 0);
+
+		// compute start index of the contiguous region being modified 
+		std::size_t start;
+		for (start = index; start > 0 && counts[start - 1]; --start);
+		std::size_t stop = start + counts[start]; // compute stop index from start index and contiguous length
+
+		// compute updated left and right counts
+		std::size_t left = index - start;
+		std::size_t right = stop - index - 1;
+
+		// apply updated counts
+		for (std::size_t i = start; i < index; ++i) counts[i] = left;
+		counts[index] = 0;
+		for (std::size_t i = index + 1; i < stop; ++i) counts[i] = right;
+	}
+
+	friend void swap(index_union &a, index_union &b)
+	{
+		a.counts.swap(b.counts);
+	}
+};
 
 struct course_t;
 struct room_t
 {
-	std::string id;                       // room id (name)
-	int         capacity = 0;             // maximum number of students in this room
-	std::unordered_set<std::string> attr; // list of custom attributes
+	std::string                     id;       // room id (name)
+	std::size_t                     capacity; // maximum number of students in this room
+	std::unordered_set<std::string> attr;     // list of custom attributes
 };
 struct timeslot_t
 {
-	timespan                   time;        // the timespan denoting this timeslot
+	timespan                     time;        // the timespan denoting this timeslot
 	std::vector<const course_t*> assignments; // the room assignments (course id or empty string for no assignment)
 };
 struct schedule_t
 {
-	std::string id;              // id for this schedule (name)
+	std::string             id;    // id for this schedule (name)
 	std::vector<timeslot_t> slots; // the time slots associated with this schedule
 };
 struct instructor_t
 {
-	std::string id;             // id (name) of this instructor
-	time_union  unavailability; // all times when this instructor is unavailable for some reason (e.g. early morning due to long commute or other responsibilities)
+	std::string id;                   // id (name) of this instructor
+	std::size_t max_adjacent_courses; // max number of adjacent courses this instructor will teach
+	time_union  unavailability;       // all times when this instructor is unavailable for some reason (e.g. early morning due to long commute or other responsibilities)
 };
 struct course_t
 {
-	std::string id;                   // id (name) of this course
-	int           capacity = 0;         // maximum number of students taking the course (one section)
-	instructor_t *instructor = nullptr; // the instructor for this course
-	std::string   notes;                // notes for the course (displayed in output)
+	std::string   id;         // id (name) of this course
+	std::size_t   capacity;   // maximum number of students taking the course (one section)
+	instructor_t *instructor; // the instructor for this course
+	std::string   notes;      // notes for the course (displayed in output)
 
 	std::set<std::string> required_attrs; // list of all required room attributes for this course
 
@@ -192,7 +249,9 @@ bool parse_time(std::istream &f, int &dest)
 }
 bool parse_time_range(std::istream &f, timespan &span)
 {
-	return parse_time(f, span.start) && f.get() == '-' && parse_time(f, span.stop);
+	if (!parse_time(f, span.start) || f.get() != '-' || !parse_time(f, span.stop)) return false;
+	if (int c = f.peek(); c != EOF && !std::isspace((unsigned char)c)) return false;
+	return true;
 }
 
 struct line_term_t
@@ -246,6 +305,7 @@ struct constraint_parser_pack
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected room capacity"; return false; }
 		if (!(f >> r.capacity)) { err = std::string(path) + ':' + std::to_string(ln) + " - failed to parse room capacity"; return false; }
 		if (int ch = f.peek(); ch != EOF && !std::isspace((unsigned char)ch)) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected character encountered in room capacity"; return false; }
+		if (r.capacity == 0) { err = std::string(path) + ':' + std::to_string(ln) + " - room capacity was specified as zero (no courses can be assigned to it)"; return false; }
 
 		// parse (optional) attributes
 		while (!line_term() && f)
@@ -299,7 +359,12 @@ struct constraint_parser_pack
 		inst.id = str;
 		c.instructors_map.emplace(std::move(str), &inst);
 
-		if (!line_term() && f) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected tokens encountered after instructor id"; return false; }
+		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected max number of adjacent courses for this instructor"; return false; }
+		if (!(f >> inst.max_adjacent_courses)) { err = std::string(path) + ':' + std::to_string(ln) + " - failed to parse max number of adjacent courses"; return false; }
+		if (int ch = f.peek(); ch != EOF && !std::isspace((unsigned char)ch)) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected character encountered in max adjacent courses"; return false; }
+		if (inst.max_adjacent_courses == 0) { err = std::string(path) + ':' + std::to_string(ln) + " - max adjacent courses was specified as zero (instructor cannot teach any courses)"; return false; }
+
+		if (!line_term() && f) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected tokens encountered after instructor definition"; return false; }
 
 		return true;
 	}
@@ -317,6 +382,8 @@ struct constraint_parser_pack
 
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected course capacity"; return false; }
 		if (!(f >> course.capacity)) { err = std::string(path) + ':' + std::to_string(ln) + " - failed to parse course capacity"; return false; }
+		if (int ch = f.peek(); ch != EOF && !std::isspace((unsigned char)ch)) { err = std::string(path) + ':' + std::to_string(ln) + " - unexpected character encountered in course capacity"; return false; }
+		if (course.capacity == 0) { err = std::string(path) + ':' + std::to_string(ln) + " - course capacity set to zero (no students can take this course"; return false; }
 
 		// get the instructor for this course
 		if (line_term() || !f) { err = std::string(path) + ':' + std::to_string(ln) + " - expected instructor id"; return false; }
@@ -519,15 +586,32 @@ std::variant<constraint_set, std::string> read_constraints(std::istream &f, cons
 struct satisfy_info
 {
 public:
+	enum class yield_t { cont, stop };
+
 	typedef std::set<const course_t*> pset_t;
+	typedef std::list<pset_t>         fchain_t;
+	
+	struct schedule_info_t
+	{
+		schedule_t                                                   &schedule;
+		std::unordered_map<const fchain_t*, std::vector<std::size_t>> fchain_to_start_index;
+		std::vector<std::unordered_set<const instructor_t*>>          assigned_instructors;
+		std::vector<std::unordered_set<const course_t*>>              assigned_courses;
+		std::unordered_map<const instructor_t*, index_union>          instructor_to_assigned_index_union;
+	};
 
 	constraint_set &constraints;
 
-	std::list<std::list<pset_t>>                              follow_chains;            // list of all follow chains in the course topology
-	std::unordered_map<const std::list<pset_t>*, schedule_t*> follow_chain_to_schedule; // maps each follow chain to its required schedule or nullptr if no specific schedule is required
+	// this function will be called exactly once for each unique solution (return value controls yield behavior)
+	// if this returns yield_t::cont then solution searching will continue.
+	// if this returns yield_t::stop then solution searching will end and the most-recent solution will be left in this->constraints.
+	std::function<yield_t(const constraint_set&)> solution_func;
+
+	std::list<fchain_t>                              follow_chains;            // list of all follow chains in the course topology
+	std::unordered_map<const fchain_t*, schedule_t*> follow_chain_to_schedule; // maps each follow chain to its required schedule or nullptr if no specific schedule is required
 
 	// maps schedules to a map from follow chain to valid start index - used to severely prune state space for some types of constraints
-	std::unordered_map<const schedule_t*, std::unordered_map<const std::list<pset_t>*, std::vector<std::size_t>>> schedule_to_follow_chain_to_start_index;
+	std::unordered_map<const schedule_t*, schedule_info_t> schedule_to_info;
 
 	std::unordered_map<const course_t*, std::vector<std::size_t>> course_to_satisfiable_rooms; // maps each course to the set of all its satisfiable rooms based on room attrs
 
@@ -536,7 +620,7 @@ public:
 
 	// constructs a new satisfiability info object
 	// if this throws it means that the system is impossibly-constrained (as opposed to just being unsatisfiable)
-	satisfy_info(constraint_set &_c) : constraints(_c)
+	satisfy_info(constraint_set &_c, decltype(solution_func) _f) : constraints(_c), solution_func(std::move(_f))
 	{
 		std::list<pset_t>                                                psets;                  // list of all parallel course sets
 		std::unordered_map<const course_t*, std::list<pset_t>::iterator> course_to_pset;         // maps each course to its pset
@@ -544,6 +628,22 @@ public:
 		std::vector<std::list<pset_t>::iterator>                         fset;                   // temporary for building follow sets
 		bool                                                             fmerge;                 // flag for looping construction logic
 		std::unordered_map<const pset_t*, time_union>                    pset_to_unavailability; // maps each pset to its total unavailability union
+
+		course_to_pset.reserve(constraints.courses.size()); // this is a 1-1 map, so reserve space ahead of time
+
+		// initialize schedule to info map
+		for (auto &schedule : constraints.schedules)
+		{
+			schedule_info_t info{ schedule };
+
+			info.assigned_instructors.resize(schedule.slots.size());
+			info.assigned_courses.resize(schedule.slots.size());
+
+			info.instructor_to_assigned_index_union.reserve(constraints.instructors.size());
+			for (const auto &inst : constraints.instructors) info.instructor_to_assigned_index_union.emplace(&inst, schedule.slots.size());
+
+			schedule_to_info.emplace(&schedule, std::move(info));
+		}
 
 		// construct the trivial form of the parallel topology structure - just a bunch of bookmarked singletons
 		for (const auto &entry : constraints.courses)
@@ -771,7 +871,7 @@ public:
 		// examine each schedule
 		for (const auto &sched : constraints.schedules)
 		{
-			std::unordered_map<const std::list<pset_t>*, std::vector<std::size_t>> follow_chain_to_start_index;
+			std::unordered_map<const fchain_t*, std::vector<std::size_t>> follow_chain_to_start_index;
 
 			// and each follow chain
 			for (const auto &chain : follow_chains)
@@ -806,7 +906,7 @@ public:
 			}
 
 			// insert into the schedule map
-			schedule_to_follow_chain_to_start_index.emplace(&sched, std::move(follow_chain_to_start_index));
+			schedule_to_info.at(&sched).fchain_to_start_index = std::move(follow_chain_to_start_index);
 		}
 
 		// build map from each course to its set of satisfiable rooms
@@ -855,91 +955,138 @@ public:
 	}
 
 	// begins by erasing the current schedules, then recursively applies constraints in order to generate a valid schedule.
-	// returns true on success (and leaves the result in schedule).
-	bool satisfy();
+	void satisfy();
 
 private:
-	bool satisfy_fchain(std::list<std::list<pset_t>>::const_iterator chain);
-	bool satisfy_pset_at(std::list<std::list<pset_t>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<pset_t>::const_iterator pset);
-	bool satisfy_pset_at_interior(std::list<std::list<pset_t>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<pset_t>::const_iterator pset, pset_t::const_iterator ppos);
+	bool satisfy_fchain(std::list<fchain_t>::const_iterator chain);
+	bool satisfy_pset_at(std::list<fchain_t>::const_iterator chain, schedule_info_t &sched_info, std::size_t slot_i, fchain_t::const_iterator pset);
+	bool satisfy_pset_at_interior(std::list<fchain_t>::const_iterator chain, schedule_info_t &sched_info, std::size_t slot_i, fchain_t::const_iterator pset, pset_t::const_iterator ppos);
 };
 
-bool satisfy_info::satisfy_pset_at_interior(std::list<std::list<pset_t>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<pset_t>::const_iterator pset, pset_t::const_iterator ppos)
+bool satisfy_info::satisfy_pset_at_interior(std::list<fchain_t>::const_iterator chain, schedule_info_t &sched_info, std::size_t slot_i, fchain_t::const_iterator pset, pset_t::const_iterator ppos)
 {
 	// if we're at the end of the current pset, we're done with this pset
 	if (ppos == pset->end())
 	{
 		// recurse to the next item in the follow chain
-		return satisfy_pset_at(chain, sched, slot_i + 1, std::next(pset));
+		return satisfy_pset_at(chain, sched_info, slot_i + 1, std::next(pset));
 	}
 
-	const auto   &course = **ppos;
-	timeslot_t   &slot = sched.slots[slot_i];
+	const course_t *const course = *ppos;
+	timeslot_t &slot = sched_info.schedule.slots[slot_i];
+	auto &assigned_instructors = sched_info.assigned_instructors[slot_i];
+	auto &assigned_courses = sched_info.assigned_courses[slot_i];
 
 	// attempt to put it into each available room
 	assert(slot.assignments.size() == constraints.rooms.size());
-	for (std::size_t k : course_to_satisfiable_rooms.at(&course))
+	for (std::size_t k : course_to_satisfiable_rooms.at(course))
 	{
 		// if this room is already taken, it's not viable
 		if (slot.assignments[k]) continue;
-
+		
 		// assign current course to this schedule, timeslot, and room
-		slot.assignments[k] = *ppos;
+		slot.assignments[k] = course;
+		bool added_instructor = assigned_instructors.insert(course->instructor).second;
+		bool added_course = assigned_courses.insert(course).second;
 
 		// perform the recursive step - if we succeed, propagate up
-		if (satisfy_pset_at_interior(chain, sched, slot_i, pset, std::next(ppos))) return true;
+		if (satisfy_pset_at_interior(chain, sched_info, slot_i, pset, std::next(ppos))) return true;
 
 		// otherwise undo the change and continue searching
 		slot.assignments[k] = nullptr;
+		if (added_instructor) assigned_instructors.erase(course->instructor);
+		if (added_course) assigned_courses.erase(course);
 	}
 
 	return false;
 }
-bool satisfy_info::satisfy_pset_at(std::list<std::list<pset_t>>::const_iterator chain, schedule_t &sched, std::size_t slot_i, std::list<pset_t>::const_iterator pset)
+bool satisfy_info::satisfy_pset_at(std::list<fchain_t>::const_iterator chain, schedule_info_t &sched_info, std::size_t slot_i, fchain_t::const_iterator pset)
 {
 	// if we're at the end of the follow chain, we're done with this chain - recurse to the next
 	if (pset == chain->end()) return satisfy_fchain(std::next(chain));
 
-	assert(slot_i < sched.slots.size()); // sanity check
-	timeslot_t &slot = sched.slots[slot_i];
-	const auto &instructors = pset_to_instructors.at(&*pset);
-	const auto &orthos = pset_to_ortho_courses.at(&*pset);
+	assert(sched_info.assigned_instructors.size() == sched_info.schedule.slots.size());
+	assert(sched_info.assigned_courses.size() == sched_info.schedule.slots.size());
 
-	// examine each assignment for this timeslot
-	for (const auto *ins : slot.assignments)
+	timeslot_t &slot = sched_info.schedule.slots[slot_i];
+	const auto &assigned_instructors = sched_info.assigned_instructors[slot_i];
+	const auto &assigned_courses = sched_info.assigned_courses[slot_i];
+
+	// check orthogonal constraints
+	for (const auto *ortho : pset_to_ortho_courses.at(&*pset))
 	{
-		if (!ins) continue;
-
-		// if this timeslot is already scheduled for any instructor in this pset it's no good (instructor can't be in two places at once)
-		if (instructors.find(ins->instructor) != instructors.end()) return false;
-
-		// if this timeslot holds an orthogonal course it's no good
-		if (orthos.find(ins) != orthos.end()) return false;
+		if (assigned_courses.find(ortho) != assigned_courses.end()) return false;
 	}
 
-	// otherwise recurse into the pset
-	return satisfy_pset_at_interior(chain, sched, slot_i, pset, pset->begin());
+	// ---------------------------------------------------------------------------------------------
+
+	// !! THIS MUST COME LAST !! this code modifies assigned instructor index unions for the recursive searching and must undo them on failure
+	const auto &instructors = pset_to_instructors.at(&*pset);
+	for (auto inst = instructors.begin(); inst != instructors.end(); ++inst)
+	{
+		// get assigned indexes for this instructor
+		auto &assigned_indexes = sched_info.instructor_to_assigned_index_union.at(*inst);
+
+		// make sure we don't assign an instructor to this slot if they already have an assigned course in this slot
+		if (assigned_indexes.is_set(slot_i))
+		{
+			// undo the changes we've made to assigned indexes
+			for (auto i = instructors.begin(); i != inst; ++i) sched_info.instructor_to_assigned_index_union.at(*i).remove(slot_i);
+
+			// and return that this was a failure
+			return false;
+		}
+
+		// add this as an assigned index for this instructor - if this goes over the max number of adjacent courses for this instructor, no good
+		std::size_t v = assigned_indexes.add(slot_i);
+		if (v > (*inst)->max_adjacent_courses)
+		{
+			// undo the changes we've made to assigned indexes
+			assigned_indexes.remove(slot_i);
+			for (auto i = instructors.begin(); i != inst; ++i) sched_info.instructor_to_assigned_index_union.at(*i).remove(slot_i);
+
+			// and return that this was a failure
+			return false;
+		}
+	}
+
+	// !! ABOVE MUST COME LAST !! see above
+
+	// ---------------------------------------------------------------------------------------------
+
+	// everything is good so far - recurse into the pset
+	if (satisfy_pset_at_interior(chain, sched_info, slot_i, pset, pset->begin())) return true;
+
+	// otherwise it failed - undo changes to assigned indexes
+	for (const auto *inst : instructors) sched_info.instructor_to_assigned_index_union.at(inst).remove(slot_i);
+	
+	// and return that this was a failure
+	return false;
 }
-bool satisfy_info::satisfy_fchain(std::list<std::list<pset_t>>::const_iterator chain)
+bool satisfy_info::satisfy_fchain(std::list<fchain_t>::const_iterator chain)
 {
 	// if we're at the end of the follow chains we're done and have scheduled everything successfully (yay)
-	if (chain == follow_chains.end()) return true;
+	if (chain == follow_chains.end())
+	{
+		yield_t v = solution_func(constraints); // refer to the solution consumer
+		return v == yield_t::stop; // stop is generated by us returning true (success for total search), otherwise pretend it didn't succeed with false and resume searching
+	}
 
 	// create a function to attempt to place the current course into the given schedule
 	auto scheduler = [&] (schedule_t &sched) {
+		schedule_info_t &sched_info = schedule_to_info.at(&sched);
+		
 		// try to put it into each valid starting timeslot in the given schedule
-		for (std::size_t slot_i : schedule_to_follow_chain_to_start_index.at(&sched).at(&*chain))
+		for (std::size_t slot_i : sched_info.fchain_to_start_index.at(&*chain))
 		{
-			// if there's not enough room to fit the entire chain we can prune this entire execution branch
-			//if (slot_i + chain->size() > sched.slots.size()) break;
-			assert(slot_i + chain->size() <= sched.slots.size());
+			assert(slot_i + chain->size() <= sched.slots.size()); // this should be guaranteed by preprocessing logic
 
-			// if we can satisfy this pset with this slot
-			if (satisfy_pset_at(chain, sched, slot_i, chain->begin())) return true;
+			// attempt to place the follow chain in this starting slot
+			if (satisfy_pset_at(chain, sched_info, slot_i, chain->begin())) return true;
 		}
 		return false;
 	};
-
+	
 	// get the required schedule for this chain - if there is one, use that
 	if (schedule_t *req = follow_chain_to_schedule.at(&*chain); req)
 	{
@@ -953,11 +1100,11 @@ bool satisfy_info::satisfy_fchain(std::list<std::list<pset_t>>::const_iterator c
 			if (scheduler(sched)) return true;
 		}
 
-		// otherwise we failed to satisfy the scuedule (overconstrained)
+		// otherwise we failed to satisfy the schedule (overconstrained)
 		return false;
 	}
 }
-bool satisfy_info::satisfy()
+void satisfy_info::satisfy()
 {
 	// initialize all schedule assignments to empty
 	for (auto &sched : constraints.schedules)
@@ -970,7 +1117,7 @@ bool satisfy_info::satisfy()
 	}
 
 	// recurse to satisfy all course assignments
-	return satisfy_fchain(follow_chains.begin());
+	satisfy_fchain(follow_chains.begin());
 }
 
 void print_schedule_latex(std::ostream &ostr, const constraint_set &c, const schedule_t &sched)
@@ -1076,7 +1223,7 @@ int main(int argc, const char *const argv[]) try
 		return 1;
 	}
 
-	// ---------------------------------------------
+	// -----------------------------------------------------------------------------------------
 
 	// parse the input file (or stdin if none was specified)
 	std::variant<constraint_set, std::string> _constraints;
@@ -1092,8 +1239,6 @@ int main(int argc, const char *const argv[]) try
 	}
 	else _constraints = read_constraints(std::cin, "<stdin>");
 
-	// ---------------------------------------------
-
 	// check the error variant for parse result
 	if (_constraints.index() != 0)
 	{
@@ -1102,11 +1247,31 @@ int main(int argc, const char *const argv[]) try
 	}
 	auto &constraints = std::get<0>(_constraints);
 
-	// ---------------------------------------------
+	// -----------------------------------------------------------------------------------------
+
+	std::function<satisfy_info::yield_t(const constraint_set&)> solution_func;
+	struct
+	{
+		void(*const printer)(std::ostream&, const constraint_set&);
+
+		std::size_t solution_count = 0; // the total number of solutions that were found
+	} exec_info
+	{
+		latex ? print_schedules_latex : print_schedules_text
+	};
+
+	solution_func = [&exec_info](const constraint_set &solution)
+	{
+		// for now just mark that we found something, print it, and stop searching
+		exec_info.solution_count++;
+		exec_info.printer(std::cout, solution);
+		return satisfy_info::yield_t::stop;
+	};
 
 	// attempt to create the solver object - if this fails it means that there were impossible constraints
+	assert(solution_func);
 	std::unique_ptr<satisfy_info> solver;
-	try { solver = std::make_unique<satisfy_info>(constraints); }
+	try { solver = std::make_unique<satisfy_info>(constraints, std::move(solution_func)); }
 	catch (const std::exception & e)
 	{
 		std::cerr << "impossible constraints encountered: " << e.what() << '\n';
@@ -1116,18 +1281,13 @@ int main(int argc, const char *const argv[]) try
 	// if topology flag was set, print topology info to stderr
 	if (topology) solver->print_topology(std::cerr);
 
-	// attempt to satisfy all the constraints - if we fail, print error message and exit
-	if (!solver->satisfy())
+	// attempt to satisfy all the constraints - if we fail to generate any solutions, print error message and exit
+	solver->satisfy();
+	if (exec_info.solution_count == 0)
 	{
 		std::cerr << "failed to generate schedule (overconstrained)\n";
 		return 200;
 	}
-
-	// ---------------------------------------------
-
-	// print the resulting (satisfied) schedule
-	auto printer = latex ? print_schedules_latex : print_schedules_text;
-	printer(std::cout, constraints);
 
 	return 0;
 }
